@@ -123,6 +123,23 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
   rex::cvar::SetFlagByName("vr_world_constant", "-1");  // c15 in only some shaders: rigid
   rex::cvar::SetFlagByName("vr_wvp_constant", "0");
   rex::cvar::SetFlagByName("vr_constants_transposed", "true");
+  // Frames at the headset's rate: no 60 Hz vblank wait (the SDK paces the game to the headset), and the logic on the
+  // wall clock (its sixtieth-of-a-second steps whatever the frame rate: game_timing.cpp). Measured on the simulator,
+  // 2560x2160 an eye: 72.0 FPS at 72 Hz, 90.0 at 90 Hz (1% low 78), 0% late.
+  const auto from_command_line = [](const char* name) {
+    return rex::cvar::GetFlagSource(name) == rex::cvar::Source::kCommandLine;
+  };
+  if (!from_command_line("vsync")) {
+    rex::cvar::SetFlagByName("vsync", "false");
+  }
+  if (!std::getenv("XERENGE_UNLOCK_FPS")) {
+    _putenv_s("XERENGE_UNLOCK_FPS", "1");
+  }
+  // The eyes' render size: 2560x2160 (the draw resolution scale 2x3 on 1280x720) unless given.
+  if (!from_command_line("draw_resolution_scale_x") && !from_command_line("draw_resolution_scale_y")) {
+    rex::cvar::SetFlagByName("draw_resolution_scale_x", "2");
+    rex::cvar::SetFlagByName("draw_resolution_scale_y", "3");
+  }
   REXLOG_INFO("VR: the xenos plugin, Vulkan backend");
 }
 

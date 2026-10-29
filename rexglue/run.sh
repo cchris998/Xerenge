@@ -53,6 +53,11 @@
 #   ./run.sh --online-address=IP
 #                       the address this copy gives its peers and binds to:
 #                       127.0.0.2 and 127.0.0.3 run two copies on one machine.
+#   ./run.sh --vr       in a headset through OpenXR (the vr branch): the xenos GPU
+#                       plugin on Vulkan, stereo, the HUD on its own layer, paced to
+#                       the headset. SteamVR (or another OpenXR runtime) must be
+#                       running; --draw_resolution_scale_x=3 --draw_resolution_scale_y=5
+#                       for 3840x3600 an eye (2560x2160 by default).
 #   ./run.sh --windowed runs in a window; --fullscreen (the default) does not.
 #   ./run.sh --fps      frames per second in the top left corner (plume).
 #   ./run.sh --prompts=playstation  the PlayStation button icons (assets/input_prompts/replace/playstation/); xbox or stock: the game's own. Also BUTTON ICONS in Settings > DEBUG.
@@ -202,6 +207,7 @@ for arg in "$@"; do
         --log-level=*) LOGLEVEL=${arg#*=} ;;
         --plume)   GPU_BACKEND=plume ;;
         --xenos)   GPU_BACKEND=xenos ;;
+        --vr)      GPU_BACKEND=xenos; VR=1 ;;
         --online)  ONLINE=1 ;;
         --real-lobby) ONLINE=1; REAL_LOBBY=1 ;;
         --lobby-server=*) ONLINE=1; REAL_LOBBY=1; LOBBY_SERVER=${arg#*=} ;;
@@ -292,6 +298,7 @@ fi
 [ -n "$ONLINE_ADDRESS" ] && set -- "$@" --online_address="$ONLINE_ADDRESS"
 
 [ -n "$NOISY" ] && set -- "$@" --log_noisy=true
+[ -n "$VR" ] && set -- "$@" --vr=true
 # Fullscreen unless --windowed: said outright both ways, so a burnout.toml
 # saved with the other does not decide it.
 if [ -n "$WINDOWED" ]; then

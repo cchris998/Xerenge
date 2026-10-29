@@ -102,12 +102,13 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
   }
   // The SDK's VR layer is Vulkan's: the xenos plugin with its Vulkan backend (plume and D3D12 have none).
   rex::cvar::SetFlagByName("vr", "true");
-  // The VR layer's direct resolves (render target -> texture image, no EDRAM round trip) place each resolve at the
-  // texture's origin: Burnout draws its scene in three tiles (predicated tiling), each resolved into its third of the
-  // frame, and the headset showed three slices of different places. The plain resolve path until that is handled
-  // (MCLA_VR_DIRECT_RESOLVE set by hand wins).
+  // The VR layer's direct resolves (render target -> texture image, no EDRAM round trip) in mode 1: Burnout draws its
+  // scene in three tiles (predicated tiling), each resolved into its third of the frame; mode 1 writes each at its
+  // offset and the memory too. Mode 2 (the SDK's VR default, the memory left out) showed a stale picture in a tile (the
+  // menus' garage in the middle third); the plain path (0) costs a third of the frame rate: simulator, race, 3840x3600
+  // an eye, uncapped at 180 Hz: mode 0 113 FPS, mode 1 163. MCLA_VR_DIRECT_RESOLVE set by hand wins.
   if (!std::getenv("MCLA_VR_DIRECT_RESOLVE")) {
-    _putenv_s("MCLA_VR_DIRECT_RESOLVE", "0");
+    _putenv_s("MCLA_VR_DIRECT_RESOLVE", "1");
   }
   // The HUD on its own layer: the SDK splits a head-tracked frame at its first draw by one of these vertex shaders
   // (the race HUD's sprites and text, drawn after the scene is composited into the 1280x720 target; a frame's draw

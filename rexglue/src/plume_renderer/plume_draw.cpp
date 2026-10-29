@@ -7831,7 +7831,19 @@ void PlumeDrawContext::EncodeDraws(plume::RenderCommandList* list,
   alignas(16) uint8_t last_shared[kSharedConstantBytes];
   bool have_last_shared = false;
   uint32_t last_shared_slot = 0;
+  bool vr_hud_split = false;
   auto encode_one = [&](const GuestDrawSnapshot& snap) {
+    // VR fork: the HUD on its own layer: at the frame's first interface draw the scene (both eyes) goes to the
+    // headset's screen and the target is cleared for the HUD (plume_vr.cpp).
+    if (vr::Stereo() && snap.interface_draw && !vr_hud_split && pass && pass->end && pass->begin && colour_target) {
+      vr_hud_split = true;
+      pass->end(pass->context);
+      vr::SplitAtInterface(list, colour_target, width, height);
+      pass->begin(pass->context);
+      bound_pipeline = nullptr;
+      bound_draw_set = nullptr;
+      bound_offsets[0] = bound_offsets[1] = bound_offsets[2] = ~0u;
+    }
     EncodeStage("draw setup", &snap);
     ++fate.entered;
     if (snap.d3d_vertex_buffer != 0) {

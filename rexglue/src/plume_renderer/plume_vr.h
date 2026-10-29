@@ -11,6 +11,7 @@ struct RenderInterface;
 struct RenderDevice;
 struct RenderCommandQueue;
 struct RenderTexture;
+struct RenderCommandList;
 }  // namespace plume
 
 namespace rex::plume_renderer::vr {
@@ -31,6 +32,11 @@ void BeforeInterface();
 void AfterDevice(plume::RenderInterface* render_interface, plume::RenderDevice* device);
 /// The game's thread, at a frame's present (it drew the frame): the pose its camera was read with.
 void NoteFramePresented();
+/// The present worker, before the frame's draws are encoded: the frame's pose (NoteFramePresented's, in order).
+void BeginFrame();
+/// Encoding the frame's draws, at its first interface draw: the scene (`target`, both eyes, in COLOR_WRITE, outside a
+/// pass) to the frame's screen, and the target cleared to transparent black for the HUD (its own layer).
+void SplitAtInterface(plume::RenderCommandList* list, plume::RenderTexture* target, uint32_t width, uint32_t height);
 /// After the frame's submission: `shown` (the finished picture, in COPY_SOURCE, `layers` layers) to the headset's
 /// eyes, on the same queue, with the session's timeline signal.
 void Submit(plume::RenderDevice* device, plume::RenderCommandQueue* queue, plume::RenderTexture* shown, uint32_t width,

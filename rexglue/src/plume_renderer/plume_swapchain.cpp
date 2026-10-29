@@ -1146,6 +1146,7 @@ void PlumeSwapchain::ClearAndPresent(float r, float g, float b, float a, DrawEnc
         };
       }
     }
+    vr::BeginFrame();  // VR fork: the frame's head pose, before its draws (plume_vr.cpp)
     encode(encode_context, command_list_.get(), width, height, draw_target, pass);
   }
 

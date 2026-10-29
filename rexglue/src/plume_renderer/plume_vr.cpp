@@ -45,6 +45,8 @@ struct Submission {
   uint32_t next = 0;
 } g_submission;
 bool g_active = false;
+FramePose g_frame;           // the frame being encoded and submitted (BeginFrame)
+bool g_split = false;        // its scene went to its screen at its first interface draw (SplitAtInterface)
 }  // namespace
 
 bool Requested() {
@@ -142,38 +144,89 @@ void NoteFramePresented() {
   }
 }
 
+void BeginFrame() {
+  if (!g_active) {
+    return;
+  }
+  g_frame = {};
+  g_split = false;
+  {
+    std::scoped_lock lock{g_pose_mutex};
+    if (!g_poses.empty()) {
+      g_frame = g_poses.front();
+      g_poses.pop_front();
+    }
+  }
+  xr::SetPresentPose(g_frame.posed, *reinterpret_cast<const float(*)[16]>(g_frame.pose),
+                     *reinterpret_cast<const float(*)[4]>(g_frame.tangents));
+  xr::SetFrameHasScene(g_frame.posed);
+}
+
+void SplitAtInterface(plume::RenderCommandList* list, plume::RenderTexture* target, uint32_t width, uint32_t height) {
+  static const bool off = std::getenv("XERENGE_VR_HUD_LAYER") && std::getenv("XERENGE_VR_HUD_LAYER")[0] == '0';
+  if (off || !g_active || !g_frame.posed || g_split || !list || !target || !width || !height) {
+    return;
+  }
+  const int screen = xr::SplitFrame(width, height, float(height) / float(width));
+  if (screen < 0) {
+    return;
+  }
+  g_split = true;
+  VkCommandBuffer cmd = static_cast<plume::VulkanCommandList*>(list)->vk;
+  auto* texture = static_cast<plume::VulkanTexture*>(target);
+  const uint32_t layers = texture->desc.arraySize;
+  xr::RecordLayeredFrameCopy(cmd, texture->vk, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, width, height, screen, layers);
+  // The HUD over transparent black.
+  VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+  barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+  barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+  barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  barrier.image = texture->vk;
+  barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layers};
+  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr,
+                       1, &barrier);
+  const VkClearColorValue clear{};
+  vkCmdClearColorImage(cmd, texture->vk, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1, &barrier.subresourceRange);
+  barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+  barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+  barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr,
+                       0, nullptr, 1, &barrier);
+}
+
 void Submit(plume::RenderDevice* device, plume::RenderCommandQueue* queue, plume::RenderTexture* shown, uint32_t width,
             uint32_t height, uint32_t layers) {
   if (!g_active || !shown || !width || !height) {
     return;
   }
-  FramePose frame;
-  {
-    std::scoped_lock lock{g_pose_mutex};
-    if (!g_poses.empty()) {
-      frame = g_poses.front();
-      g_poses.pop_front();
-    }
+  const FramePose& frame = g_frame;
+  if (g_split) {
+    xr::HudCaptured();  // the HUD's picture, copied below, goes with the split frame
   }
-  xr::SetPresentPose(frame.posed, *reinterpret_cast<const float(*)[16]>(frame.pose),
-                     *reinterpret_cast<const float(*)[4]>(frame.tangents));
-  xr::SetFrameHasScene(frame.posed);
-  const int screen = xr::BeginFrame(width, height);
+  int screen = xr::BeginFrame(width, height);
+  const bool split = screen <= -2;  // its scene is on screen -2 - screen (SplitAtInterface), the HUD to copy
+  if (split) {
+    screen = -2 - screen;
+  }
   {  // development: every 2 s, what reached the headset
-    static uint32_t calls = 0, posed = 0, refused = 0, queued = 0;
+    static uint32_t calls = 0, posed = 0, refused = 0, queued = 0, split_count = 0;
     static auto since = std::chrono::steady_clock::now();
     ++calls;
     posed += frame.posed ? 1 : 0;
     refused += screen < 0 ? 1 : 0;
+    split_count += split ? 1 : 0;
     {
       std::scoped_lock lock{g_pose_mutex};
       queued += uint32_t(g_poses.size());
     }
     const auto now = std::chrono::steady_clock::now();
     if (now - since >= std::chrono::seconds(2)) {
-      REXLOG_INFO("plume VR: {} frames to the headset in {:.1f} s ({} posed, {} refused, {:.1f} poses waiting)", calls,
-                  std::chrono::duration<double>(now - since).count(), posed, refused, double(queued) / calls);
-      calls = posed = refused = queued = 0;
+      REXLOG_INFO("plume VR: {} frames to the headset in {:.1f} s ({} posed, {} HUD split, {} refused, {:.1f} poses waiting)", calls,
+                  std::chrono::duration<double>(now - since).count(), posed, split_count, refused, double(queued) / calls);
+      calls = posed = refused = queued = split_count = 0;
       since = now;
     }
   }
@@ -192,7 +245,12 @@ void Submit(plume::RenderDevice* device, plume::RenderCommandQueue* queue, plume
   VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
   begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   vkBeginCommandBuffer(cmd, &begin);
-  xr::RecordLayeredFrameCopy(cmd, vk_texture->vk, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, width, height, screen, layers);
+  if (split) {  // the target holds the HUD (the left eye's: both draw the same) for the HUD layer
+    xr::RecordFrameCopy(cmd, vk_texture->vk, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, width, height, screen, xr::kCopyHud);
+  } else {
+    xr::RecordLayeredFrameCopy(cmd, vk_texture->vk, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, width, height, screen,
+                               layers);
+  }
   vkEndCommandBuffer(cmd);
   VkSemaphore timeline = VK_NULL_HANDLE;
   uint64_t value = 0;

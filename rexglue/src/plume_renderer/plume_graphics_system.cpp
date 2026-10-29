@@ -44,6 +44,7 @@
 #include "frame_clock_provider.h"
 #include "plume_renderer/plume_draw.h"
 #include "plume_renderer/plume_framegen.h"
+#include "plume_renderer/plume_vr.h"
 #include "plume_renderer/plume_interp.h"
 #include "plume_renderer/plume_parallel.h"
 #include "plume_renderer/plume_shader_cache.h"
@@ -295,6 +296,7 @@ bool PlumeGraphicsSystem::InitializePlumeDevice() {
 #if defined(__ANDROID__)
   UseAndroidCustomVulkanDriver();
 #endif
+  vr::BeforeInterface();  // VR fork: the headset runtime's extensions and features (plume_vr.cpp)
   render_interface_ = std::make_unique<plume::VulkanInterface>();
   if (!render_interface_ || !render_interface_->isValid()) {
     REXLOG_ERROR("plume: Vulkan interface failed to initialize");
@@ -315,6 +317,7 @@ bool PlumeGraphicsSystem::InitializePlumeDevice() {
     return false;
   }
 
+  vr::AfterDevice(render_interface_.get(), render_device_.get());  // VR fork
   REXLOG_INFO("plume: render device ready");
   return true;
 }
@@ -1824,6 +1827,7 @@ void PlumeGraphicsSystem::PresentGuestFrame(uint32_t width, uint32_t height) {
   g_title_tid.store(int(gettid()), std::memory_order_relaxed);
 #endif
   PaceSwapToVblank();
+  vr::NoteFramePresented();  // VR fork: the frame's head pose (plume_vr.cpp)
   last_present_ms_.store(static_cast<uint64_t>(
                              std::chrono::duration_cast<std::chrono::milliseconds>(
                                  std::chrono::steady_clock::now().time_since_epoch())

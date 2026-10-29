@@ -119,6 +119,7 @@ set(REXGPU_PLUME_SOURCES
     src/plume_renderer/plume_framegen.cpp
     src/plume_renderer/plume_settings.cpp
     src/plume_renderer/plume_colour_table.cpp
+    src/plume_renderer/plume_vr.cpp
     src/plume_renderer/plugin_main.cpp
     src/plume_renderer/shader_source_info.cpp
     "${XENON_RECOMP_ROOT}/thirdparty/smol-v/source/smolv.cpp"

@@ -100,8 +100,37 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
     }
     return;
   }
-  // The SDK's VR layer is Vulkan's: the xenos plugin with its Vulkan backend (plume and D3D12 have none).
   rex::cvar::SetFlagByName("vr", "true");
+  // The renderer (VR RENDERER, vr_renderer in xerenge.conf; XERENGE_VR_RENDERER wins): xenos (the SDK's VR layer on
+  // the xenos plugin's Vulkan backend, the default) or plume (its own renderer, no EDRAM emulation: plume_vr.cpp runs
+  // the same OpenXR layer on plume's device). The camera hooks below serve both.
+  std::string renderer = xerenge::settings::ConfString("vr_renderer", "xenos");
+  if (const char* v = std::getenv("XERENGE_VR_RENDERER"); v && *v) {
+    renderer = v;
+  }
+  if (renderer == "plume") {
+    _putenv_s("XERENGE_VR_PLUME", "1");
+    // plume's switches, as the launcher and run.sh set them for it.
+    for (const char* name : {"XERENGE_D3D_TARGETS", "XERENGE_D3D_UI", "XERENGE_REAL_SHADERS", "XERENGE_D3D_DRAWS",
+                             "XERENGE_SECONDARY_TICKS"}) {
+      if (!std::getenv(name)) {
+        _putenv_s(name, "1");
+      }
+    }
+    // Frames at the headset's rate: no desktop vsync, no 60 Hz vblank pacing (the logic on the wall clock).
+    _putenv_s("XERENGE_NO_HOST_VSYNC", "1");
+    if (!std::getenv("XERENGE_UNLOCK_FPS")) {
+      _putenv_s("XERENGE_UNLOCK_FPS", "1");
+    }
+    // Drawing between logic steps moves the moving draws on the xenos GPU thread only: the camera alone moving would
+    // shake the car against it.
+    if (!std::getenv("XERENGE_VR_INTERPOLATE")) {
+      _putenv_s("XERENGE_VR_INTERPOLATE", "0");
+    }
+    REXLOG_INFO("VR: the plume renderer");
+    return;
+  }
+  // The SDK's VR layer on the xenos plugin with its Vulkan backend.
   // The VR layer's direct resolves (render target -> texture image, no EDRAM round trip) in mode 1: Burnout draws its
   // scene in three tiles (predicated tiling), each resolved into its third of the frame; mode 1 writes each at its
   // offset and the memory too. Mode 2 (the SDK's VR default, the memory left out) showed a stale picture in a tile (the

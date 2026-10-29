@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include "plume_renderer/plume_swapchain.h"
+#include "plume_renderer/plume_vr.h"
 
 #include "diagnostics.h"
 #include "plume_renderer/plume_framegen.h"
@@ -1282,6 +1283,9 @@ void PlumeSwapchain::ClearAndPresent(float r, float g, float b, float a, DrawEnc
   plume::RenderCommandSemaphore* wait_semaphore = acquire_semaphore_.get();
   command_queue_->executeCommandLists(&cmd_list, 1, &wait_semaphore, 1, &release_semaphore, 1,
                                       submit_fence_.get());
+  if (scene_texture_) {  // VR fork: the picture to the headset's eyes, after the frame (plume_vr.cpp)
+    vr::Submit(device_, command_queue_.get(), shown, width, height, 1);
+  }
   const auto submit_started = std::chrono::steady_clock::now();
   swap_chain_->present(image_index, &release_semaphore, 1);
   const auto present_done = std::chrono::steady_clock::now();

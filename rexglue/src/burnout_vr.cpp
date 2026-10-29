@@ -176,6 +176,12 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
       rex::cvar::SetFlagByName("vr_dlss_output_scale", dlss == "dlaa" ? "1.0" : dlss.c_str());
     }
   }
+  // The SDK lowers the eye size when video memory looks short, by Midnight Club's estimate (1.05 GB a unit of scale
+  // area): Burnout's render targets take far less (4.9 GB at 5x6), and its estimate held 4x6 (5120x4320, 90 FPS at
+  // 90 Hz, 0% late on the simulator) down to 4x5. 0.3 GB a unit. MCLA_VR_VRAM_GB_PER_AREA set by hand wins.
+  if (!std::getenv("MCLA_VR_VRAM_GB_PER_AREA")) {
+    _putenv_s("MCLA_VR_VRAM_GB_PER_AREA", "0.3");
+  }
   // The frame cap (VR FRAME CAP, vr_frame_cap: 1 off, 2 half the refresh, 3 a third).
   if (!from_command_line("vr_frame_cap")) {
     const std::string cap = xerenge::settings::ConfString("vr_frame_cap", "1");

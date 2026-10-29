@@ -18,6 +18,8 @@
 // plume the same way the previous runtime did. Leave xenos alone — a second
 // drain there underflows to 0xFFFFFFFF. XERENGE_FRAME_RETIRE forces it on
 // either backend.
+#include <rex/logging.h>
+#include <chrono>
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
@@ -50,9 +52,13 @@ bool PlumePresentationActive() {
   return graphics && graphics->uses_direct_presentation();
 }
 
+// VR branch, xenos: set once a retire interrupt has been missed (sub_82482680): from then on the counter is drained
+// as on plume.
+std::atomic<bool> g_interrupt_missed{false};
+
 bool Enabled() {
   static const bool forced = std::getenv("XERENGE_FRAME_RETIRE") != nullptr;
-  return forced || PlumePresentationActive();
+  return forced || PlumePresentationActive() || g_interrupt_missed.load(std::memory_order_relaxed);
 }
 
 bool Tracing() {
@@ -73,10 +79,38 @@ void Retire(PPCContext& ctx, uint8_t* base, uint32_t renderer, uint32_t leave_in
   }
 }
 
+// VR branch, xenos: whether the renderer's count has stood above 0, unchanged, for a quarter of a second (a missed retire
+// interrupt: the player then waits for it for good - in Render at 3, in its flush and teardown for 0). Sets
+// g_interrupt_missed, and from then on the counter is drained as on plume.
+void WatchForMissedRetire(const uint8_t* base, uint32_t renderer) {
+  static uint32_t watched = 0, value = 0;
+  static std::chrono::steady_clock::time_point since;
+  if (g_interrupt_missed.load(std::memory_order_relaxed) || PlumePresentationActive()) {
+    return;
+  }
+  const uint32_t now_value = InFlight(base, renderer);
+  const auto now = std::chrono::steady_clock::now();
+  if (now_value == 0 || now_value >= 0x80000000u || renderer != watched || now_value != value) {
+    watched = renderer;
+    value = now_value;
+    since = now;
+    return;
+  }
+  if (now - since > std::chrono::milliseconds(250)) {
+    REXLOG_WARN("movie: renderer {:08X} held {} frame(s) for 250 ms (a missed retire interrupt): drained from now on",
+                renderer, now_value);
+    g_interrupt_missed = true;
+  }
+}
+
 }  // namespace
 
 REX_HOOK_RAW(sub_82482680) {
   const uint32_t renderer = ctx.r3.u32;
+  WatchForMissedRetire(base, renderer);  // VR branch, xenos
+  if (g_interrupt_missed.load(std::memory_order_relaxed) && InFlight(base, renderer) >= 0x80000000u) {
+    xerenge::StoreGuestU32(base, renderer + kInFlightOffset, 0);  // a late interrupt after a drain went below 0
+  }
   if (Enabled()) {
     // Render refuses the blit when 3 frames are already outstanding. If the
     // CP interrupt never retires them, the player retries forever on the
@@ -107,6 +141,7 @@ REX_HOOK_RAW(sub_82482680) {
 
 REX_HOOK_RAW(sub_824822C8) {
   const uint32_t renderer = ctx.r3.u32;
+  WatchForMissedRetire(base, renderer);  // VR branch, xenos
   if (Enabled()) {
     Retire(ctx, base, renderer, 0);
     ctx.r3.u32 = renderer;
@@ -116,6 +151,7 @@ REX_HOOK_RAW(sub_824822C8) {
 
 REX_HOOK_RAW(sub_82482430) {
   const uint32_t renderer = ctx.r3.u32;
+  WatchForMissedRetire(base, renderer);  // VR branch, xenos
   if (Enabled()) {
     Retire(ctx, base, renderer, 0);
     ctx.r3.u32 = renderer;

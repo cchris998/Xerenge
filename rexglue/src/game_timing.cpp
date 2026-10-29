@@ -40,6 +40,7 @@
 #include <rex/ppc.h>
 
 #include "frame_clock_provider.h"
+#include "burnout_vr.h"
 #include "guest_memory.h"
 #include "widescreen.h"
 
@@ -128,6 +129,7 @@ extern "C" void __imp__sub_82363E68(PPCContext& __restrict, uint8_t*);
 // sub_82363E68(timer, min_steps, max_steps) -> steps to run next frame.
 REX_HOOK_RAW(sub_82363E68) {
   const uint32_t timer = ctx.r3.u32;
+  xerenge::vr_port::PaceFrame();  // VR: one game frame per headset frame
   g_doubled_this_frame = g_doubled_next_frame;
   g_doubled_next_frame = false;
   if (FramesLockedTo30() && ctx.r4.u32 == 1) {

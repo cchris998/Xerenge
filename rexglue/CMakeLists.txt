@@ -32,6 +32,7 @@ set(BURNOUT_SOURCES
     src/game_timing.cpp
     src/plume_d3d_hooks.cpp
     src/widescreen.cpp
+    src/burnout_vr.cpp
 )
 
 if(WIN32)

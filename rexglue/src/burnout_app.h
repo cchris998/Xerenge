@@ -7,6 +7,7 @@
 #include <rex/logging.h>
 #include <rex/rex_app.h>
 
+#include "burnout_vr.h"
 #include "online_lobby.h"
 #include "plume_d3d.h"
 #include "xerenge_settings.h"
@@ -23,7 +24,10 @@ class BurnoutApp : public rex::ReXApp {
         PPCImageConfig));
   }
 
-  void OnPreSetup(rex::RuntimeConfig&) override { xerenge::settings::ApplyAtStart(); }
+  void OnPreSetup(rex::RuntimeConfig& config) override {
+    xerenge::settings::ApplyAtStart();
+    xerenge::vr_port::ConfigureAtStart(config);  // VR
+  }
 
   // Which build this is, first in the log: a report then says it by itself.
   void OnPostInitLogging() override { REXLOG_INFO("Xerenge {} ({})", XERENGE_VERSION, XERENGE_COMMIT); }

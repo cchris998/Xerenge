@@ -289,6 +289,17 @@ PER_FRAME_INTERFACE_HOOK(sub_820B4BC0)  // CB4FlashManager::Render
 PER_FRAME_INTERFACE_HOOK(sub_821FF008)  // CB4CustomRevengeMeter::Render
 PER_FRAME_HOOK(sub_822AE800)  // CB4SoundManager::Update
 
+// VR (burnout_vr.cpp): the logic state run so far and the wall clock, in steps; false while the timer is not on the
+// wall clock.
+bool XerengeLogicClock(double& state_steps, double& real_steps) {
+  if (!g_clock.valid) {
+    return false;
+  }
+  state_steps = g_clock.state_steps;
+  real_steps = g_clock.real_steps;
+  return true;
+}
+
 // For the renderer (plume reads rex_frame_clock_provider): where the drawn state is
 // in logic steps and where the wall clock is, so frames drawn between two
 // steps can be drawn between the two states.

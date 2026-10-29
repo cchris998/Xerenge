@@ -12,6 +12,7 @@
 // frame, the view matrix and the culling (from the view-projection matrix) all follow the head; at the view window
 // the headset's field of view replaces the game's (a symmetric frustum covering both eyes).
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -215,6 +216,145 @@ bool RendererCameraRead(uint32_t lr) {
   return lr == 0x82175374u || lr == 0x821753A0u || lr == 0x82175614u;
 }
 
+// Drawing between logic steps (60 a second, under 72-120 Hz frames): the camera of each logic state (CGtViewport::Update
+// on the update thread), and at the renderer's read the frame's camera turned and moved to its moment between the
+// state it draws and the one before (one step behind the wall clock, as plume's interpolation); the SDK moves the
+// moving draws the same way (vr::SetFrameInterpolation). XERENGE_VR_INTERPOLATE=0: off.
+bool XerengeLogicClock(double& state_steps, double& real_steps);
+struct CameraState {
+  double state = -1.0;
+  float rows[4][3]{};
+};
+std::mutex g_camera_states_mutex;
+std::array<CameraState, 4> g_camera_states;  // the latest last
+bool InterpolationOn() {
+  static const bool on = !(std::getenv("XERENGE_VR_INTERPOLATE") && std::getenv("XERENGE_VR_INTERPOLATE")[0] == '0');
+  return on;
+}
+
+void NoteCameraState(uint8_t* base, uint32_t matrix) {
+  double state, real;
+  if (!InterpolationOn() || !XerengeLogicClock(state, real)) {
+    return;
+  }
+  CameraState c;
+  c.state = state;
+  for (int r = 0; r < 4; ++r) {
+    for (int k = 0; k < 3; ++k) {
+      c.rows[r][k] = LoadFloat(base, matrix + 16 * r + 4 * k);
+    }
+  }
+  std::scoped_lock lock{g_camera_states_mutex};
+  if (g_camera_states.back().state == state) {
+    g_camera_states.back() = c;  // the same state again (a frame without a step)
+    return;
+  }
+  if (state < g_camera_states.back().state) {
+    g_camera_states = {};  // the timer started over
+  }
+  std::rotate(g_camera_states.begin(), g_camera_states.begin() + 1, g_camera_states.end());
+  g_camera_states.back() = c;
+}
+
+// The renderer's copy of the camera matrix (`m`, rows right, up, at, pos) moved to the frame's moment: the state it
+// holds (by its rows) and the one before, t = where the clock less a step falls between them. The frame's state and t
+// go to the SDK for the moving draws.
+void InterpolateCamera(uint8_t* base, uint32_t m) {
+  if (!InterpolationOn()) {
+    return;
+  }
+  double state_now, real;
+  if (!XerengeLogicClock(state_now, real)) {
+    return;
+  }
+  float rows[4][3];
+  for (int r = 0; r < 4; ++r) {
+    for (int k = 0; k < 3; ++k) {
+      rows[r][k] = LoadFloat(base, m + 16 * r + 4 * k);
+    }
+  }
+  CameraState from, to;
+  {
+    std::scoped_lock lock{g_camera_states_mutex};
+    int found = -1;
+    for (int i = int(g_camera_states.size()) - 1; i >= 0 && found < 0; --i) {
+      if (g_camera_states[i].state >= 0.0 && std::memcmp(g_camera_states[i].rows, rows, sizeof(rows)) == 0) {
+        found = i;
+      }
+    }
+    if (found <= 0 || g_camera_states[found - 1].state < 0.0) {
+      return;
+    }
+    from = g_camera_states[found - 1];
+    to = g_camera_states[found];
+  }
+  // Where the clock stands against the state it draws (real - state) cycles through a step's width, but where that
+  // step sits moves (the timer runs a step a little early, or the drawn state trails by most of a step): measured, the
+  // low end of the last 128 frames' (2nd percentile) is where t = 0 falls, so the frames' moments stay evenly spaced.
+  static std::array<double, 128> offsets{};
+  static uint32_t offset_count = 0;
+  offsets[offset_count++ % offsets.size()] = real - to.state;
+  double low = real - to.state;
+  if (offset_count >= 16) {
+    std::array<double, 128> sorted = offsets;
+    const size_t n = std::min<size_t>(offset_count, sorted.size());
+    std::sort(sorted.begin(), sorted.begin() + n);
+    low = sorted[n / 50];
+  }
+  const double span = to.state - from.state;
+  float t = span > 0.0 && span <= 4.0
+                ? float(std::clamp((real - low - 1.0 - from.state) / span, 0.0, 1.0))
+                : 1.f;
+  // A cut (a replay's or a crash's cameras): drawn as it is.
+  const float dx = to.rows[3][0] - from.rows[3][0], dy = to.rows[3][1] - from.rows[3][1],
+              dz = to.rows[3][2] - from.rows[3][2];
+  if (dx * dx + dy * dy + dz * dz > 10.f * 10.f) {
+    t = 1.f;
+  }
+  vr::SetFrameInterpolation(vr::GameSwapCount(), to.state, t);
+  if (static const bool log = std::getenv("XERENGE_VR_INTERPLOG") != nullptr; log) {  // development
+    const float x = from.rows[3][0] + (to.rows[3][0] - from.rows[3][0]) * t,
+                z = from.rows[3][2] + (to.rows[3][2] - from.rows[3][2]) * t;
+    REXLOG_INFO("VR interpolation: frame {} state {} t {:.3f} real {:.3f} camera {:.3f} {:.3f} (state's {:.3f} {:.3f})",
+                vr::GameSwapCount(), to.state, t, real, x, z, to.rows[3][0], to.rows[3][2]);
+  }
+  if (t >= 1.f) {
+    return;
+  }
+  float out[4][3];
+  for (int r = 0; r < 4; ++r) {
+    for (int k = 0; k < 3; ++k) {
+      out[r][k] = from.rows[r][k] + (to.rows[r][k] - from.rows[r][k]) * t;
+    }
+  }
+  // The axes made orthonormal again (at, then up, then right), each keeping its length (1 for a camera).
+  auto dot = [](const float* a, const float* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
+  auto normalize = [&](float* a) {
+    const float l = std::sqrt(dot(a, a));
+    if (l > 1e-6f) {
+      a[0] /= l, a[1] /= l, a[2] /= l;
+    }
+  };
+  normalize(out[2]);
+  const float ua = dot(out[1], out[2]);
+  for (int k = 0; k < 3; ++k) {
+    out[1][k] -= ua * out[2][k];
+  }
+  normalize(out[1]);
+  const float ra = dot(out[0], out[2]), ru = dot(out[0], out[1]);
+  for (int k = 0; k < 3; ++k) {
+    out[0][k] -= ra * out[2][k] + ru * out[1][k];
+  }
+  normalize(out[0]);
+  for (uint32_t matrix : {m, m + 64}) {  // the matrix and the LTM
+    for (int r = 0; r < 4; ++r) {
+      for (int k = 0; k < 3; ++k) {
+        StoreFloat(base, matrix + 16 * r + 4 * k, out[r][k]);
+      }
+    }
+  }
+}
+
 // Rows right, up, at, pos (RenderWare, left-handed: right x up = at) turned and moved by the head's pose.
 void PoseRwMatrix(uint8_t* base, uint32_t m, const float (&pose)[16]) {
   float rows[4][3];
@@ -264,6 +404,9 @@ REX_HOOK_RAW(sub_820FBE60) {
   if (lr == kViewportUpdateMatrixCaller) {
     g_camera_frame.store(ctx.r3.u32, std::memory_order_relaxed);
     if (vr::Active()) {
+      NoteCameraState(base, ctx.r1.u32 + 80);  // the new matrix, on CGtViewport::Update's stack
+    }
+    if (vr::Active()) {
       // The pose this frame is built with; the view window (next) takes the headset's field of view.
       t_posed = vr::HeadPose(t_pose, t_tangents);
       if (t_posed) {
@@ -299,6 +442,17 @@ REX_HOOK_RAW(sub_820FBE60) {
       copy = REX_KERNEL_MEMORY()->SystemHeapAlloc(128, 16);
     }
     std::memcpy(xerenge::GuestPointer(base, copy), xerenge::GuestPointer(base, ctx.r3.u32), 128);
+    {  // once a frame (three reads): the same moment for all
+      static uint64_t interpolated_frame = ~0ull;
+      static uint8_t interpolated[128];
+      if (interpolated_frame != vr::GameSwapCount()) {
+        interpolated_frame = vr::GameSwapCount();
+        InterpolateCamera(base, copy);
+        std::memcpy(interpolated, xerenge::GuestPointer(base, copy), 128);
+      } else {
+        std::memcpy(xerenge::GuestPointer(base, copy), interpolated, 128);
+      }
+    }
     PoseRwMatrix(base, copy, pose);
     PoseRwMatrix(base, copy + 64, pose);
     ctx.r3.u64 = copy;

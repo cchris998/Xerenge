@@ -34,6 +34,7 @@
 
 #include "burnout_vr.h"
 #include "guest_memory.h"
+#include "xerenge_settings.h"
 
 extern "C" void __imp__sub_820FBE60(PPCContext& __restrict, uint8_t*);
 extern "C" void __imp__sub_8234ABC0(PPCContext& __restrict, uint8_t*);
@@ -135,10 +136,20 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
   if (!std::getenv("XERENGE_UNLOCK_FPS")) {
     _putenv_s("XERENGE_UNLOCK_FPS", "1");
   }
-  // The eyes' render size: 2560x2160 (the draw resolution scale 2x3 on 1280x720) unless given.
+  // The eyes' render size: the draw resolution scale XxY on 1280x720 from the settings (Driver Details > Settings >
+  // GRAPHICS > VR EYE SIZE, vr_resolution in xerenge.conf; 2x3, 2560x2160, by default) unless the command line sets it.
   if (!from_command_line("draw_resolution_scale_x") && !from_command_line("draw_resolution_scale_y")) {
-    rex::cvar::SetFlagByName("draw_resolution_scale_x", "2");
-    rex::cvar::SetFlagByName("draw_resolution_scale_y", "3");
+    const std::string size = xerenge::settings::ConfString("vr_resolution", "2x3");
+    const size_t cross = size.find('x');
+    const int x = cross != std::string::npos ? std::clamp(std::atoi(size.c_str()), 1, 4) : 2;
+    const int y = cross != std::string::npos ? std::clamp(std::atoi(size.c_str() + cross + 1), 1, 6) : 3;
+    rex::cvar::SetFlagByName("draw_resolution_scale_x", std::to_string(x).c_str());
+    rex::cvar::SetFlagByName("draw_resolution_scale_y", std::to_string(y).c_str());
+  }
+  // The frame cap (VR FRAME CAP, vr_frame_cap: 1 off, 2 half the refresh, 3 a third).
+  if (!from_command_line("vr_frame_cap")) {
+    const std::string cap = xerenge::settings::ConfString("vr_frame_cap", "1");
+    rex::cvar::SetFlagByName("vr_frame_cap", cap == "2" || cap == "3" ? cap.c_str() : "1");
   }
   REXLOG_INFO("VR: the xenos plugin, Vulkan backend");
 }

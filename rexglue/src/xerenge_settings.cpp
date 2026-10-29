@@ -228,6 +228,13 @@ const std::vector<Setting>& Settings() {
     blur.live = [](int option) { XerengeSetMenuMotionBlur(option == 1); };
     blur.running = [] { return std::getenv("XERENGE_NO_MOTION_BLUR") ? 0 : 1; };
     s.push_back(blur);
+    // VR (the vr branch, run.sh --vr): the eyes' render size and the frame cap, at the next start
+    // (burnout_vr.cpp).
+    s.push_back({17, kGraphics, "VR EYE SIZE", "vr_resolution",
+                 {{"2560X2160", "2x3"}, {"2560X2880", "2x4"}, {"3840X2880", "3x4"}, {"3840X3600", "3x5"},
+                  {"3840X4320", "3x6"}},
+                 0});
+    s.push_back({18, kGraphics, "VR FRAME CAP", "vr_frame_cap", {{"OFF", "1"}, {"1/2", "2"}, {"1/3", "3"}}, 0});
 
     // The frame rates: 30 is fps_30, 120 frame_generation (for the race and
     // Crash mode alike), Crash mode's 60 crash_interpolation.

@@ -146,6 +146,17 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
     rex::cvar::SetFlagByName("draw_resolution_scale_x", std::to_string(x).c_str());
     rex::cvar::SetFlagByName("draw_resolution_scale_y", std::to_string(y).c_str());
   }
+  // Bloom and motion blur as the flat game has them: the launcher sets these from xerenge.conf, and a VR start (run.sh
+  // --vr, burnout.exe --vr) does not go through it. Without bloom the 3D frame comes out at under half its brightness
+  // on this renderer (plume makes up for it; this one draws the composite as the console does), so it follows the
+  // settings like the flat game's. Already set in the environment wins.
+  if (!std::getenv("XERENGE_NO_BLOOM") && !xerenge::settings::ConfString("bloom", "true").starts_with("true")) {
+    _putenv_s("XERENGE_NO_BLOOM", "1");
+  }
+  if (!std::getenv("XERENGE_NO_MOTION_BLUR") &&
+      !xerenge::settings::ConfString("motion_blur", "true").starts_with("true")) {
+    _putenv_s("XERENGE_NO_MOTION_BLUR", "1");
+  }
   // The frame cap (VR FRAME CAP, vr_frame_cap: 1 off, 2 half the refresh, 3 a third).
   if (!from_command_line("vr_frame_cap")) {
     const std::string cap = xerenge::settings::ConfString("vr_frame_cap", "1");

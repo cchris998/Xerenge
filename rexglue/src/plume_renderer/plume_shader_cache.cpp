@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <iterator>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -19,6 +20,7 @@
 #include <rex/logging.h>
 
 #include "shader_cache.h"
+#include "plume_renderer/plume_vr.h"
 
 #ifndef XERENGE_HAS_SHADER_CACHE
 ShaderCacheEntry g_shaderCacheEntries[1]{};
@@ -50,6 +52,18 @@ extern const size_t g_spirvCacheCompressedSizeBootstrap XERENGE_WEAK;
 extern const size_t g_spirvCacheDecompressedSizeBootstrap XERENGE_WEAK;
 extern ShaderMicrocodeEntry g_shaderMicrocodeEntriesBootstrap[] XERENGE_WEAK;
 extern const size_t g_shaderMicrocodeEntryCountBootstrap XERENGE_WEAK;
+
+// VR: the multiview (stereo) variants of the primary and runtime caches (shader_common_stereo.h).
+extern ShaderCacheEntry g_shaderCacheEntriesStereo[] XERENGE_WEAK;
+extern const size_t g_shaderCacheEntryCountStereo XERENGE_WEAK;
+extern const uint8_t g_compressedSpirvCacheStereo[] XERENGE_WEAK;
+extern const size_t g_spirvCacheCompressedSizeStereo XERENGE_WEAK;
+extern const size_t g_spirvCacheDecompressedSizeStereo XERENGE_WEAK;
+extern ShaderCacheEntry g_shaderCacheEntriesStereoBootstrap[] XERENGE_WEAK;
+extern const size_t g_shaderCacheEntryCountStereoBootstrap XERENGE_WEAK;
+extern const uint8_t g_compressedSpirvCacheStereoBootstrap[] XERENGE_WEAK;
+extern const size_t g_spirvCacheCompressedSizeStereoBootstrap XERENGE_WEAK;
+extern const size_t g_spirvCacheDecompressedSizeStereoBootstrap XERENGE_WEAK;
 
 namespace rex::plume_renderer {
 
@@ -410,9 +424,89 @@ bool PlumeShaderCache::EnsureBootstrapDecompressed() {
   return bootstrap_decompressed_valid_;
 }
 
+// VR: a shader's multiview variant (both eyes in one draw: the view's layer of 2D textures, the eye's clip shift),
+// from the stereo caches by its hash; null when there is none.
+namespace {
+struct StereoCache {
+  const ShaderCacheEntry* entries;
+  size_t count;
+  const uint8_t* compressed;
+  size_t compressed_size, decompressed_size;
+  std::vector<uint8_t> blob;
+  bool tried = false;
+};
+std::mutex g_stereo_mutex;
+std::unordered_map<uint64_t, std::vector<uint32_t>> g_stereo_modules;
+
+const uint32_t* StereoSpirvWords(uint64_t hash, size_t& word_count) {
+  static StereoCache caches[2] = {
+      {&g_shaderCacheEntryCountStereo ? g_shaderCacheEntriesStereo : nullptr,
+       &g_shaderCacheEntryCountStereo ? g_shaderCacheEntryCountStereo : 0,
+       &g_spirvCacheCompressedSizeStereo ? g_compressedSpirvCacheStereo : nullptr,
+       &g_spirvCacheCompressedSizeStereo ? g_spirvCacheCompressedSizeStereo : 0,
+       &g_spirvCacheDecompressedSizeStereo ? g_spirvCacheDecompressedSizeStereo : 0},
+      {&g_shaderCacheEntryCountStereoBootstrap ? g_shaderCacheEntriesStereoBootstrap : nullptr,
+       &g_shaderCacheEntryCountStereoBootstrap ? g_shaderCacheEntryCountStereoBootstrap : 0,
+       &g_spirvCacheCompressedSizeStereoBootstrap ? g_compressedSpirvCacheStereoBootstrap : nullptr,
+       &g_spirvCacheCompressedSizeStereoBootstrap ? g_spirvCacheCompressedSizeStereoBootstrap : 0,
+       &g_spirvCacheDecompressedSizeStereoBootstrap ? g_spirvCacheDecompressedSizeStereoBootstrap : 0}};
+  std::scoped_lock lock{g_stereo_mutex};
+  if (auto it = g_stereo_modules.find(hash); it != g_stereo_modules.end()) {
+    word_count = it->second.size();
+    return it->second.empty() ? nullptr : it->second.data();
+  }
+  std::vector<uint32_t>& module = g_stereo_modules[hash];
+  for (StereoCache& cache : caches) {
+    const ShaderCacheEntry* entry = LowerBoundHash(cache.entries, cache.count, hash);
+    if (!entry || !cache.compressed) {
+      continue;
+    }
+    if (!cache.tried) {
+      cache.tried = true;
+      cache.blob.resize(cache.decompressed_size);
+      const size_t result =
+          ZSTD_decompress(cache.blob.data(), cache.decompressed_size, cache.compressed, cache.compressed_size);
+      if (ZSTD_isError(result) || result != cache.decompressed_size) {
+        cache.blob.clear();
+        REXLOG_ERROR("plume: stereo SPIR-V cache ZSTD decompress failed");
+      }
+    }
+    if (entry->spirvSize == 0 || entry->spirvOffset > cache.blob.size() ||
+        entry->spirvSize > cache.blob.size() - entry->spirvOffset) {
+      continue;
+    }
+    const uint8_t* encoded = cache.blob.data() + entry->spirvOffset;
+    const size_t decoded_size = smolv::GetDecodedBufferSize(encoded, entry->spirvSize);
+    if (decoded_size == 0 || (decoded_size & 3u) != 0u) {
+      continue;
+    }
+    module.resize(decoded_size / sizeof(uint32_t));
+    if (!smolv::Decode(encoded, entry->spirvSize, module.data(), decoded_size) || module[0] != 0x07230203u) {
+      module.clear();
+      continue;
+    }
+    break;
+  }
+  if (module.empty()) {
+    static int missing = 0;
+    if (missing++ < 16) {
+      REXLOG_WARN("plume VR: no stereo variant of shader {:016X} (drawn for the left eye only)", hash);
+    }
+    return nullptr;
+  }
+  word_count = module.size();
+  return module.data();
+}
+}  // namespace
+
 const uint32_t* PlumeShaderCache::GetSpirvWords(const ShaderCacheEntry& entry,
                                                 size_t& word_count) {
   word_count = 0;
+  if (vr::StereoShaders()) {
+    if (const uint32_t* words = StereoSpirvWords(entry.hash, word_count)) {
+      return words;
+    }
+  }
   const bool extra = IsExtraEntry(entry);
   const bool bootstrap = !extra && IsBootstrapEntry(entry);
   if (extra) {

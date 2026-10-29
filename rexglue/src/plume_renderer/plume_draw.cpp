@@ -50,6 +50,7 @@
 
 #include "plume_renderer/plume_passthrough_spirv.h"
 #include "plume_renderer/plume_colour_table.h"
+#include "plume_renderer/plume_vr.h"
 #include "plume_renderer/plume_settings.h"
 #include "plume_renderer/plume_video_spirv.h"
 #include "plume_renderer/plume_shader_cache.h"
@@ -2837,6 +2838,7 @@ plume::RenderPipeline* PlumeDrawContext::ScreenPipelineFor(
   desc.inputElements = screen_elements.data();
   desc.inputElementsCount = uint32_t(screen_elements.size());
 
+  desc.viewMask = vr::Stereo() ? 0b11u : 0u;  // VR fork: multiview, both eyes in one draw
   auto pipeline = device_->createGraphicsPipeline(desc);
   if (!pipeline || !VulkanPipelineOk(pipeline.get())) {
     static uint32_t fail_logs = 0;
@@ -3260,6 +3262,7 @@ plume::RenderPipeline* PlumeDrawContext::GetOrCreatePipeline(
   desc.specConstants = &spec;
   desc.specConstantsCount = 1;
 
+  desc.viewMask = vr::Stereo() ? 0b11u : 0u;  // VR fork: multiview, both eyes in one draw
   std::unique_ptr<plume::RenderPipeline> pipeline = device_->createGraphicsPipeline(desc);
   if (!pipeline || !VulkanPipelineOk(pipeline.get())) {
     static uint32_t fail_logs = 0;
@@ -3436,7 +3439,7 @@ plume::RenderDescriptorSet* PlumeDrawContext::DrawSetFor(const DrawBindings& bin
     key[32 + s] = {bindings.cube[s], version(cube_set_.get(), bindings.cube[s])};
     key[48 + s] = {bindings.sampler[s], version(sampler_set_.get(), bindings.sampler[s])};
   }
-  const uint64_t hash = XXH3_64bits(key.data(), sizeof(key));
+  const uint64_t hash = XXH3_64bits(key.data(), sizeof(key)) ^ (bindings.array_views ? 0x9E3779B97F4A7C15ull : 0);
   auto it = draw_sets_.find(hash);
   if (it == draw_sets_.end()) {
     DrawSet made;
@@ -3462,7 +3465,16 @@ plume::RenderDescriptorSet* PlumeDrawContext::DrawSetFor(const DrawBindings& bin
       }
     };
     for (uint32_t s = 0; s < kDrawSlots; ++s) {
-      texture(3 + s, texture_set_.get(), bindings.tex2d[s]);
+      if (bindings.array_views && texture_set_) {  // VR fork: stereo shaders
+        const BindlessTable::Entry& e = texture_set_->at(bindings.tex2d[s]);
+        if (e.texture) {
+          if (const plume::RenderTextureView* view = ArrayViewFor(bindings.tex2d[s])) {
+            made.set->setTexture(3 + s, e.texture, e.layout, view);
+          }
+        }
+      } else {
+        texture(3 + s, texture_set_.get(), bindings.tex2d[s]);
+      }
       texture(3 + kDrawSlots + s, volume_set_.get(), bindings.layered[s]);
       texture(3 + 2 * kDrawSlots + s, cube_set_.get(), bindings.cube[s]);
       const plume::RenderSampler* sampler = sampler_set_ ? sampler_set_->at(bindings.sampler[s]).sampler : nullptr;
@@ -3475,6 +3487,37 @@ plume::RenderDescriptorSet* PlumeDrawContext::DrawSetFor(const DrawBindings& bin
   return it->second.set.get();
 }
 
+// VR fork: a 2D texture entry's view of an array type (the stereo shaders declare the 2D textures arrays and read the
+// eye's layer: a stereo copy's own, a one-layer texture's only one), made once per entry version.
+const plume::RenderTextureView* PlumeDrawContext::ArrayViewFor(uint32_t index) {
+  const BindlessTable::Entry& e = texture_set_->at(index);
+  if (!e.texture) {
+    return nullptr;
+  }
+  const uint64_t key = (uint64_t(index) << 32) | e.version;
+  auto it = array_views_.find(key);
+  if (it == array_views_.end()) {
+    plume::RenderTextureViewDesc desc;
+    if (e.view) {
+      desc = static_cast<const plume::VulkanTextureView*>(e.view)->desc;
+    } else {
+      const auto* texture = static_cast<const plume::VulkanTexture*>(e.texture);
+      desc.format = texture->desc.format;
+      desc.mipLevels = texture->desc.mipLevels;
+    }
+    desc.dimension = plume::RenderTextureViewDimension::TEXTURE_2D;
+    desc.forceArray = true;
+    ArrayView made;
+    made.view = e.texture->createTextureView(desc);
+    if (!made.view) {
+      return e.view;
+    }
+    it = array_views_.emplace(key, std::move(made)).first;
+  }
+  it->second.last_used = frame_serial_;
+  return it->second.view.get();
+}
+
 // Sets not used for a few frames are dropped once there are many; the frames
 // that may still be on the GPU are the last two.
 void PlumeDrawContext::TrimDrawSets() {
@@ -3485,6 +3528,14 @@ void PlumeDrawContext::TrimDrawSets() {
   if (now - last_report_ms.load(std::memory_order_relaxed) >= 10000) {
     last_report_ms.store(now, std::memory_order_relaxed);
     REXLOG_INFO("plume: draw descriptor sets: {} cached, {} made so far", draw_sets_.size(), draw_sets_made_);
+  }
+  // VR fork: array views of replaced entries (no set made from now on refers to them), once the frames that used them
+  // are done.
+  if (array_views_.size() > 1024 && texture_set_) {
+    std::erase_if(array_views_, [&](const auto& kv) {
+      const uint32_t index = uint32_t(kv.first >> 32), version = uint32_t(kv.first);
+      return texture_set_->at(index).version != version && kv.second.last_used + 8 < frame_serial_;
+    });
   }
   if (draw_sets_.size() <= 6144) {
     return;
@@ -5808,6 +5859,9 @@ void PlumeDrawContext::ResolveRenderTarget(plume::RenderCommandList* list,
                                                  plume::RenderTextureFlag::CUBE)
              : plume::RenderTextureDesc::Texture2D(dest_width, dest_height, 1,
                                                    kColorTargetFormat);
+    if (!cube && vr::Stereo()) {  // VR fork: a copy of the stereo scene keeps both eyes (a layer each)
+      desc.arraySize = 2;
+    }
     desc.committed = true;
     // The old view first: its destructor reaches the device through its
     // texture, which the assignment below frees.
@@ -7100,6 +7154,11 @@ void PlumeDrawContext::FillSharedConstants(uint8_t* dst, const GuestDrawSnapshot
   float half_y = height ? shift(height, grid_h) : (1.0f / 720.0f);
   std::memcpy(dst + 280, &half_x, 4);
   std::memcpy(dst + 284, &half_y, 4);
+  if (vr::Stereo()) {  // VR fork: the eyes' clip shifts of perspective geometry (shader_common_stereo.h)
+    const float left = vr::EyeShift(0), right = vr::EyeShift(1);
+    std::memcpy(dst + 320, &left, 4);
+    std::memcpy(dst + 324, &right, 4);
+  }
   float alpha = snap.alpha_test ? snap.alpha_ref : 0.0f;
   std::memcpy(dst + 308, &alpha, 4);
 }
@@ -8212,6 +8271,7 @@ void PlumeDrawContext::EncodeDraws(plume::RenderCommandList* list,
         bindings.cube[s] = words[32 + s];
         bindings.sampler[s] = words[48 + s];
       }
+      bindings.array_views = vr::Stereo() ? 1u : 0u;  // VR fork: the title's stereo shaders
     }
     const uint64_t changes_now = tables_changes();
     plume::RenderDescriptorSet* draw_set = nullptr;

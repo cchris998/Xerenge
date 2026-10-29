@@ -652,9 +652,15 @@ void PlumeSwapchain::CreateFramebuffers() {
   post_fx_.ReleaseTargets();
   scene_texture_.reset();
   scene_texture1_.reset();
+  // VR fork: stereo, both eyes in one pass (multiview): the scene's targets with a layer an eye.
+  const uint32_t layers = vr::Stereo() ? 2 : 1;
+  const auto layered = [layers](plume::RenderTextureDesc desc) {
+    desc.arraySize = layers;
+    return desc;
+  };
   if (width != 0 && height != 0) {
     depth_texture_ = device_->createTexture(
-        plume::RenderTextureDesc::DepthTarget(width, height, kPlumeDepthFormat));
+        layered(plume::RenderTextureDesc::DepthTarget(width, height, kPlumeDepthFormat)));
     if (!depth_texture_) {
       REXLOG_ERROR("plume: could not create a {}x{} depth target; depth testing stays off", width,
                    height);
@@ -671,12 +677,12 @@ void PlumeSwapchain::CreateFramebuffers() {
                                              std::getenv("XERENGE_D3D_TARGETS") != nullptr;
     // Same format as the swapchain, so presenting it is a straight copy.
     scene_texture_ = scene_target_enabled
-                         ? device_->createTexture(plume::RenderTextureDesc::ColorTarget(
-                               width, height, kColorTargetFormat))
+                         ? device_->createTexture(layered(plume::RenderTextureDesc::ColorTarget(
+                               width, height, kColorTargetFormat)))
                          : nullptr;
     if (scene_texture_ && PlumeSecondTargetEnabled()) {
-      scene_texture1_ = device_->createTexture(plume::RenderTextureDesc::ColorTarget(
-          width, height, kColorTargetFormat));
+      scene_texture1_ = device_->createTexture(layered(plume::RenderTextureDesc::ColorTarget(
+          width, height, kColorTargetFormat)));
     }
     if (scene_texture_) {
       const plume::RenderTexture* scene_attachments[2] = {scene_texture_.get(),
@@ -685,6 +691,7 @@ void PlumeSwapchain::CreateFramebuffers() {
       scene_desc.colorAttachments = scene_attachments;
       scene_desc.colorAttachmentsCount = scene_texture1_ ? 2 : 1;
       scene_desc.depthAttachment = depth_texture_.get();
+      scene_desc.viewMask = layers > 1 ? 0b11u : 0u;  // VR fork: multiview
       scene_framebuffer_ = device_->createFramebuffer(scene_desc);
     }
     if (scene_texture_ && !scene_framebuffer_) {
@@ -713,8 +720,8 @@ void PlumeSwapchain::CreateFramebuffers() {
   // The window's own images take the depth target only when it is theirs in
   // size: drawn at another size, nothing but the overlay reaches them.
   plume::RenderTexture* const window_depth =
-      render_width_ == window_width && render_height_ == window_height ? depth_texture_.get()
-                                                                        : nullptr;
+      render_width_ == window_width && render_height_ == window_height && layers == 1 ? depth_texture_.get()
+                                                                                       : nullptr;
 
   const uint32_t texture_count = swap_chain_->getTextureCount();
   framebuffers_.reserve(texture_count);
@@ -1160,7 +1167,8 @@ void PlumeSwapchain::ClearAndPresent(float r, float g, float b, float a, DrawEnc
   // sharpening on - the target they left it in, at the same size. Recorded in
   // the frame's own list, so that when the copy waits for the image the passes
   // do not.
-  plume::RenderTexture* const shown = scene_texture_
+  // VR fork: stereo (2-layer targets) without the post-processing (its shaders read one layer).
+  plume::RenderTexture* const shown = scene_texture_ && !vr::Stereo()
                                           ? post_fx_.Record(command_list_.get(), draw_target,
                                                             width, height, post)
                                           : draw_target;
@@ -1284,7 +1292,7 @@ void PlumeSwapchain::ClearAndPresent(float r, float g, float b, float a, DrawEnc
   command_queue_->executeCommandLists(&cmd_list, 1, &wait_semaphore, 1, &release_semaphore, 1,
                                       submit_fence_.get());
   if (scene_texture_) {  // VR fork: the picture to the headset's eyes, after the frame (plume_vr.cpp)
-    vr::Submit(device_, command_queue_.get(), shown, width, height, 1);
+    vr::Submit(device_, command_queue_.get(), shown, width, height, vr::Stereo() ? 2 : 1);
   }
   const auto submit_started = std::chrono::steady_clock::now();
   swap_chain_->present(image_index, &release_semaphore, 1);

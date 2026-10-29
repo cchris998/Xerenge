@@ -988,7 +988,15 @@ class PlumeDrawContext {
     uint32_t layered[16] = {};
     uint32_t cube[16] = {};
     uint32_t sampler[16] = {};
+    uint32_t array_views = 0;  // VR fork: the title's stereo shaders read their 2D textures as arrays
   };
+  // VR fork: a 2D texture's view of an array type (its layers: an eye each, or the one for both), by its table entry.
+  struct ArrayView {
+    std::unique_ptr<plume::RenderTextureView> view;
+    uint64_t last_used = 0;
+  };
+  std::unordered_map<uint64_t, ArrayView> array_views_;
+  const plume::RenderTextureView* ArrayViewFor(uint32_t index);
   struct DrawSet {
     std::unique_ptr<plume::RenderDescriptorSet> set;
     uint64_t last_used = 0;

@@ -13,6 +13,7 @@
 #include "plume_renderer/plume_vr.h"
 
 #include <array>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -53,6 +54,16 @@ bool Requested() {
   }();
   return requested;
 }
+
+bool Stereo() {
+  static const bool mono = [] {
+    const char* v = std::getenv("XERENGE_VR_MONO");
+    return v && v[0] == '1';
+  }();
+  return g_active && !mono;
+}
+
+float EyeShift(int eye) { return xr::EyeShift(eye); }
 
 void BeforeInterface() {
   if (!Requested()) {
@@ -148,6 +159,24 @@ void Submit(plume::RenderDevice* device, plume::RenderCommandQueue* queue, plume
                      *reinterpret_cast<const float(*)[4]>(frame.tangents));
   xr::SetFrameHasScene(frame.posed);
   const int screen = xr::BeginFrame(width, height);
+  {  // development: every 2 s, what reached the headset
+    static uint32_t calls = 0, posed = 0, refused = 0, queued = 0;
+    static auto since = std::chrono::steady_clock::now();
+    ++calls;
+    posed += frame.posed ? 1 : 0;
+    refused += screen < 0 ? 1 : 0;
+    {
+      std::scoped_lock lock{g_pose_mutex};
+      queued += uint32_t(g_poses.size());
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - since >= std::chrono::seconds(2)) {
+      REXLOG_INFO("plume VR: {} frames to the headset in {:.1f} s ({} posed, {} refused, {:.1f} poses waiting)", calls,
+                  std::chrono::duration<double>(now - since).count(), posed, refused, double(queued) / calls);
+      calls = posed = refused = queued = 0;
+      since = now;
+    }
+  }
   if (screen < 0) {
     return;
   }

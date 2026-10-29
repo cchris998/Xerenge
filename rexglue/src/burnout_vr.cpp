@@ -117,10 +117,25 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
         _putenv_s(name, "1");
       }
     }
+    // The eyes' render size: VR EYE SIZE (vr_resolution, XxY on 1280x720: 2x3, 2560x2160, by default), plume's render
+    // resolution. XERENGE_RENDER_RESOLUTION set by hand wins.
+    if (!std::getenv("XERENGE_RENDER_RESOLUTION")) {
+      const std::string size = xerenge::settings::ConfString("vr_resolution", "2x3");
+      const size_t cross = size.find('x');
+      const int x = cross != std::string::npos ? std::clamp(std::atoi(size.c_str()), 1, 6) : 2;
+      const int y = cross != std::string::npos ? std::clamp(std::atoi(size.c_str() + cross + 1), 1, 6) : 3;
+      _putenv_s("XERENGE_RENDER_RESOLUTION", fmt::format("{}x{}", 1280 * x, 720 * y).c_str());
+    }
     // Frames at the headset's rate: no desktop vsync, no 60 Hz vblank pacing (the logic on the wall clock).
     _putenv_s("XERENGE_NO_HOST_VSYNC", "1");
     if (!std::getenv("XERENGE_UNLOCK_FPS")) {
       _putenv_s("XERENGE_UNLOCK_FPS", "1");
+    }
+    // The headset's pacing by its timer, not its token: the token (a frame's publication, then the next swap) waits on
+    // plume's present, a frame behind on its own thread - game, plume and headset in series: 56 FPS at 180 Hz, 180 with
+    // the timer (simulator, race, 2560x2160 an eye). MCLA_VR_PACE_TOKEN set by hand wins.
+    if (!std::getenv("MCLA_VR_PACE_TOKEN")) {
+      _putenv_s("MCLA_VR_PACE_TOKEN", "0");
     }
     // Drawing between logic steps moves the moving draws on the xenos GPU thread only: the camera alone moving would
     // shake the car against it.

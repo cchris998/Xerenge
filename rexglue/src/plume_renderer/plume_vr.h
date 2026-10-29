@@ -32,6 +32,9 @@ void BeforeInterface();
 void AfterDevice(plume::RenderInterface* render_interface, plume::RenderDevice* device);
 /// The game's thread, at a frame's present (it drew the frame): the pose its camera was read with.
 void NoteFramePresented();
+/// Whether the vertex shader (plume's shader hash, or the microcode's) is one of the HUD's (MCLA_VR_HUD_VS, the
+/// microcode hashes the SDK's xenos path splits at; burnout_vr.cpp sets the title's).
+bool HudVertexShader(uint64_t vs_hash);
 /// The present worker, before the frame's draws are encoded: the frame's pose (NoteFramePresented's, in order).
 void BeginFrame();
 /// Encoding the frame's draws, at its first interface draw: the scene (`target`, both eyes, in COLOR_WRITE, outside a

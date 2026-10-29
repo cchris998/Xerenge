@@ -108,6 +108,12 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
   if (const char* v = std::getenv("XERENGE_VR_RENDERER"); v && *v) {
     renderer = v;
   }
+  // The HUD on its own layer: either renderer splits a head-tracked frame at its first draw by one of these vertex shaders
+  // (the race HUD's sprites and text, drawn after the scene is composited into the 1280x720 target; a frame's draw
+  // log, VR_LOG_FRAME_FILE). MCLA_VR_HUD_VS set by hand wins.
+  if (!std::getenv("MCLA_VR_HUD_VS")) {
+    _putenv_s("MCLA_VR_HUD_VS", "BCEC88072A5F344D,30B5339A49CB9B5B,B2352AFC8C60D6B7,D25CBA074BB11277");
+  }
   if (renderer == "plume") {
     _putenv_s("XERENGE_VR_PLUME", "1");
     // plume's switches, as the launcher and run.sh set them for it.
@@ -153,12 +159,6 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
   // an eye, uncapped at 180 Hz: mode 0 113 FPS, mode 1 163. MCLA_VR_DIRECT_RESOLVE set by hand wins.
   if (!std::getenv("MCLA_VR_DIRECT_RESOLVE")) {
     _putenv_s("MCLA_VR_DIRECT_RESOLVE", "1");
-  }
-  // The HUD on its own layer: the SDK splits a head-tracked frame at its first draw by one of these vertex shaders
-  // (the race HUD's sprites and text, drawn after the scene is composited into the 1280x720 target; a frame's draw
-  // log, VR_LOG_FRAME_FILE). MCLA_VR_HUD_VS set by hand wins.
-  if (!std::getenv("MCLA_VR_HUD_VS")) {
-    _putenv_s("MCLA_VR_HUD_VS", "BCEC88072A5F344D,30B5339A49CB9B5B,B2352AFC8C60D6B7,D25CBA074BB11277");
   }
   // DLSS's inputs: the scene is drawn in three tiles at 2x MSAA (each tile's depth rows at its resolve, sample 0), and
   // the static world's vertex shaders draw with the camera's view-projection as their WVP (the world at the identity:

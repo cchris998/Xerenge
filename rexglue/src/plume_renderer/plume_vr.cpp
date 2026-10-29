@@ -11,14 +11,18 @@
  * the frame's present, on the same thread, takes it for the frame.
  */
 #include "plume_renderer/plume_vr.h"
+#include "plume_renderer/plume_shader_cache.h"
+#include "shader_cache.h"
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <mutex>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include <plume_vulkan.h>
@@ -46,6 +50,7 @@ struct Submission {
 } g_submission;
 bool g_active = false;
 FramePose g_frame;           // the frame being encoded and submitted (BeginFrame)
+std::atomic<uint32_t> g_split_calls{0}, g_split_unposed{0}, g_split_refused{0};  // development
 bool g_split = false;        // its scene went to its screen at its first interface draw (SplitAtInterface)
 }  // namespace
 
@@ -144,6 +149,29 @@ void NoteFramePresented() {
   }
 }
 
+bool HudVertexShader(uint64_t vs_hash) {
+  static const std::unordered_set<uint64_t> hashes = [] {
+    std::unordered_set<uint64_t> set;
+    const char* list = std::getenv("MCLA_VR_HUD_VS");
+    for (const char* p = list ? list : ""; *p;) {
+      char* end = nullptr;
+      const uint64_t microcode = std::strtoull(p, &end, 16);
+      if (end == p) {
+        break;
+      }
+      set.insert(microcode);
+      // The draws name plume's own shader hash when the microcode is in its cache.
+      if (const ShaderMicrocodeEntry* entry = PlumeShaderCache::Instance().FindByMicrocode(microcode)) {
+        set.insert(entry->shaderHash);
+      }
+      p = *end ? end + 1 : end;
+    }
+    REXLOG_INFO("plume VR: {} HUD vertex shaders", set.size());
+    return set;
+  }();
+  return vs_hash != 0 && hashes.count(vs_hash) != 0;
+}
+
 void BeginFrame() {
   if (!g_active) {
     return;
@@ -164,11 +192,14 @@ void BeginFrame() {
 
 void SplitAtInterface(plume::RenderCommandList* list, plume::RenderTexture* target, uint32_t width, uint32_t height) {
   static const bool off = std::getenv("XERENGE_VR_HUD_LAYER") && std::getenv("XERENGE_VR_HUD_LAYER")[0] == '0';
+  ++g_split_calls;
   if (off || !g_active || !g_frame.posed || g_split || !list || !target || !width || !height) {
+    g_split_unposed += g_frame.posed ? 0 : 1;
     return;
   }
   const int screen = xr::SplitFrame(width, height, float(height) / float(width));
   if (screen < 0) {
+    ++g_split_refused;
     return;
   }
   g_split = true;
@@ -224,8 +255,8 @@ void Submit(plume::RenderDevice* device, plume::RenderCommandQueue* queue, plume
     }
     const auto now = std::chrono::steady_clock::now();
     if (now - since >= std::chrono::seconds(2)) {
-      REXLOG_INFO("plume VR: {} frames to the headset in {:.1f} s ({} posed, {} HUD split, {} refused, {:.1f} poses waiting)", calls,
-                  std::chrono::duration<double>(now - since).count(), posed, split_count, refused, double(queued) / calls);
+      REXLOG_INFO("plume VR: {} frames to the headset in {:.1f} s ({} posed, {} HUD split, {} refused, {:.1f} poses waiting; HUD {} unposed {} refused {})", calls,
+                  std::chrono::duration<double>(now - since).count(), posed, split_count, refused, double(queued) / calls, g_split_calls.exchange(0), g_split_unposed.exchange(0), g_split_refused.exchange(0));
       calls = posed = refused = queued = split_count = 0;
       since = now;
     }

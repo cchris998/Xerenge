@@ -7833,9 +7833,12 @@ void PlumeDrawContext::EncodeDraws(plume::RenderCommandList* list,
   uint32_t last_shared_slot = 0;
   bool vr_hud_split = false;
   auto encode_one = [&](const GuestDrawSnapshot& snap) {
-    // VR fork: the HUD on its own layer: at the frame's first interface draw the scene (both eyes) goes to the
-    // headset's screen and the target is cleared for the HUD (plume_vr.cpp).
-    if (vr::Stereo() && snap.interface_draw && !vr_hud_split && pass && pass->end && pass->begin && colour_target) {
+    // VR fork: the HUD on its own layer: at the frame's first draw by a HUD vertex shader the scene (both eyes)
+    // goes to the headset's screen and the target is cleared for the HUD (plume_vr.cpp). The shader, not the
+    // interface hooks: the race HUD is drawn from the title's job loop, on whichever thread takes the job, and the
+    // hooks' thread-local mark saw it only when the main thread ran the job itself (72 Hz yes, 120 Hz and up no).
+    if (vr::Stereo() && !vr_hud_split && pass && pass->end && pass->begin && colour_target &&
+        vr::HudVertexShader(snap.vs_hash)) {
       vr_hud_split = true;
       pass->end(pass->context);
       vr::SplitAtInterface(list, colour_target, width, height);

@@ -158,3 +158,64 @@ REX_HOOK_RAW(sub_82482430) {
   }
   __imp__sub_82482430(ctx, base);
 }
+
+// VR branch, xenos: the movie player's worker and the title's main thread hand frames to each other through the
+// player's synchronization events (sub_8248D1E0..sub_8248D240 wait without a timeout on the events at +84, +100,
+// +116, +132, +148). On xenos a wakeup was now and then lost: the worker waiting on +100 (sub_8248D1F8, called from
+// 0x8248DAC4) and the main thread on +132 (sub_8248D228) for good - the main menu froze on 3 of 4 boots, flat and in
+// VR, never on plume. The worker's wait gets a quarter-second limit there, after which it carries on as if woken (it
+// then signals the main thread). XERENGE_NO_MOVIE_WAIT_LIMIT=1 leaves it as it was.
+extern "C" void __imp__sub_8248D1F8(PPCContext& __restrict, uint8_t*);
+extern "C" void __imp__sub_8248D228(PPCContext& __restrict, uint8_t*);
+extern "C" void __imp__KeWaitForSingleObject(PPCContext& __restrict, uint8_t*);
+
+namespace {
+
+// The player's wait on its event at `offset` with a quarter-second limit; false when it was not limited (plume, or
+// XERENGE_NO_MOVIE_WAIT_LIMIT=1: the caller runs the original).
+bool LimitedPlayerWait(PPCContext& ctx, uint8_t* base, uint32_t offset, const char* who) {
+  static const bool off = std::getenv("XERENGE_NO_MOVIE_WAIT_LIMIT") != nullptr;
+  if (off || PlumePresentationActive()) {
+    return false;
+  }
+  static uint32_t timeout = 0;
+  if (!timeout) {
+    timeout = REX_KERNEL_MEMORY()->SystemHeapAlloc(8, 8);
+    // A relative timeout: -250 ms in 100 ns units, big-endian.
+    const uint64_t bits = uint64_t(int64_t(-2500000));
+    xerenge::StoreGuestU32(base, timeout, uint32_t(bits >> 32));
+    xerenge::StoreGuestU32(base, timeout + 4, uint32_t(bits));
+  }
+  const uint32_t player = ctx.r3.u32;
+  const uint64_t lr = ctx.lr;
+  ctx.r3.u64 = player + offset;
+  ctx.r4.u64 = 3;
+  ctx.r5.u64 = 1;
+  ctx.r6.u64 = 0;
+  ctx.r7.u64 = timeout;
+  __imp__KeWaitForSingleObject(ctx, base);
+  ctx.lr = lr;
+  if (ctx.r3.u32 == 0x00000102u) {  // STATUS_TIMEOUT: a lost wakeup
+    static std::atomic<uint32_t> told{0};
+    if (told.fetch_add(1, std::memory_order_relaxed) < 20) {
+      REXLOG_WARN("movie: the player's {} waited 250 ms on {:08X}+{} (a lost wakeup): carried on", who, player,
+                  offset);
+    }
+    ctx.r3.u64 = 0;
+  }
+  return true;
+}
+
+}  // namespace
+
+REX_HOOK_RAW(sub_8248D1F8) {
+  if (!LimitedPlayerWait(ctx, base, 100, "worker")) {
+    __imp__sub_8248D1F8(ctx, base);
+  }
+}
+
+REX_HOOK_RAW(sub_8248D228) {
+  if (!LimitedPlayerWait(ctx, base, 132, "main thread")) {
+    __imp__sub_8248D228(ctx, base);
+  }
+}

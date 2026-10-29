@@ -95,6 +95,13 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
   }
   // The SDK's VR layer is Vulkan's: the xenos plugin with its Vulkan backend (plume and D3D12 have none).
   rex::cvar::SetFlagByName("vr", "true");
+  // The VR layer's direct resolves (render target -> texture image, no EDRAM round trip) place each resolve at the
+  // texture's origin: Burnout draws its scene in three tiles (predicated tiling), each resolved into its third of the
+  // frame, and the headset showed three slices of different places. The plain resolve path until that is handled
+  // (MCLA_VR_DIRECT_RESOLVE set by hand wins).
+  if (!std::getenv("MCLA_VR_DIRECT_RESOLVE")) {
+    _putenv_s("MCLA_VR_DIRECT_RESOLVE", "0");
+  }
   config.graphics = rex::system::LoadGpuPlugin("xenos", "vulkan");
   if (!config.graphics) {
     REXLOG_ERROR("VR: could not load the xenos GPU plugin with the Vulkan backend");

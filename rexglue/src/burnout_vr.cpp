@@ -18,13 +18,18 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
+#include <map>
 #include <mutex>
+#include <string>
 
+#include <fmt/format.h>
 #include <rex/cvar.h>
 #include <rex/hook.h>
 #include <rex/logging.h>
 #include <rex/ppc.h>
 #include <rex/system/gpu_plugin.h>
+#include <rex/system/kernel_state.h>
 #include <rex/ui/vulkan/vr_openxr.h>
 
 #include "burnout_vr.h"
@@ -102,6 +107,12 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
   if (!std::getenv("MCLA_VR_DIRECT_RESOLVE")) {
     _putenv_s("MCLA_VR_DIRECT_RESOLVE", "0");
   }
+  // The HUD on its own layer: the SDK splits a head-tracked frame at its first draw by one of these vertex shaders
+  // (the race HUD's sprites and text, drawn after the scene is composited into the 1280x720 target; a frame's draw
+  // log, VR_LOG_FRAME_FILE). MCLA_VR_HUD_VS set by hand wins.
+  if (!std::getenv("MCLA_VR_HUD_VS")) {
+    _putenv_s("MCLA_VR_HUD_VS", "BCEC88072A5F344D,30B5339A49CB9B5B,B2352AFC8C60D6B7,D25CBA074BB11277");
+  }
   config.graphics = rex::system::LoadGpuPlugin("xenos", "vulkan");
   if (!config.graphics) {
     REXLOG_ERROR("VR: could not load the xenos GPU plugin with the Vulkan backend");
@@ -109,7 +120,7 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
   }
   // (The plugin's cvars exist once it is loaded.) The SDK tells the head-tracked scene by its draws' matrices: Burnout's vertex shaders keep gObjToWorldMatrix at
   // c15 and gObjToProjMatrix at c0, transposed (clip.i = dot(c_i, position)).
-  rex::cvar::SetFlagByName("vr_world_constant", "15");
+  rex::cvar::SetFlagByName("vr_world_constant", "-1");  // c15 in only some shaders: rigid
   rex::cvar::SetFlagByName("vr_wvp_constant", "0");
   rex::cvar::SetFlagByName("vr_constants_transposed", "true");
   REXLOG_INFO("VR: the xenos plugin, Vulkan backend");
@@ -132,55 +143,119 @@ void PaceFrame() {
 
 // RwFrameGetMatrix (r3 the frame): at CGtViewport::Update's call the camera's new world matrix is on the caller's
 // stack (r1+80); turned and moved by the head's pose before it is copied into the frame.
+// Development (XERENGE_VR_FRAMELOG=1): the callers of RwFrameGetMatrix on the posed camera's frame, every 2 s.
+std::atomic<uint32_t> g_camera_frame{0};
+
+// The head pose of the frame being built (CGtViewport::Update's thread), for the renderer's reads (another thread).
+std::mutex g_pose_mutex;
+bool g_posed = false;
+float g_pose[16], g_tangents[4];
+
+// The renderer reads the camera frame (sub_82175350, building the view matrix: RwFrameGetMatrix from 0x82175374,
+// 0x821753A0 and 0x82175614) as the frame's matrix and, 64 bytes on, its LTM: given a posed copy of both. The
+// frame itself keeps the game's matrix: posing it (the first try) fed the head back into the chase camera, which
+// read it back and re-aimed at the car - the car stayed in the middle of the view whatever the head did.
+bool RendererCameraRead(uint32_t lr) {
+  return lr == 0x82175374u || lr == 0x821753A0u || lr == 0x82175614u;
+}
+
+// Rows right, up, at, pos (RenderWare, left-handed: right x up = at) turned and moved by the head's pose.
+void PoseRwMatrix(uint8_t* base, uint32_t m, const float (&pose)[16]) {
+  float rows[4][3];
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 3; ++c) {
+      rows[r][c] = LoadFloat(base, m + 16 * r + 4 * c);
+    }
+  }
+  const float* s = CameraAxes().s;
+  float seat[3][3];  // the camera's axes as OpenXR's seat axes (x right, y up, z back)
+  for (int c = 0; c < 3; ++c) {
+    seat[0][c] = s[0] * rows[0][c];
+    seat[1][c] = s[1] * rows[1][c];
+    seat[2][c] = s[2] * rows[2][c];
+  }
+  for (int r = 0; r < 3; ++r) {
+    for (int c = 0; c < 3; ++c) {
+      const float v = pose[r * 4 + 0] * seat[0][c] + pose[r * 4 + 1] * seat[1][c] + pose[r * 4 + 2] * seat[2][c];
+      StoreFloat(base, m + 16 * r + 4 * c, s[r] * v);
+    }
+  }
+  for (int c = 0; c < 3; ++c) {
+    StoreFloat(base, m + 48 + 4 * c,
+               rows[3][c] + pose[12] * seat[0][c] + pose[13] * seat[1][c] + pose[14] * seat[2][c]);
+  }
+}
+
 REX_HOOK_RAW(sub_820FBE60) {
-  if (uint32_t(ctx.lr) == kViewportUpdateMatrixCaller && vr::Active()) {
-    t_posed = vr::HeadPose(t_pose, t_tangents);
-    if (t_posed) {
-      // A symmetric frustum covering both eyes.
-      const float h = std::max(-t_tangents[0], t_tangents[1]), v = std::max(t_tangents[2], -t_tangents[3]);
-      t_tangents[0] = -h;
-      t_tangents[1] = h;
-      t_tangents[2] = v;
-      t_tangents[3] = -v;
-      const uint32_t m = ctx.r1.u32 + 80;
-      float rows[4][3];
-      for (int r = 0; r < 4; ++r) {
-        for (int c = 0; c < 3; ++c) {
-          rows[r][c] = LoadFloat(base, m + 16 * r + 4 * c);
-        }
+  const uint32_t lr = uint32_t(ctx.lr);
+  static const bool frame_log = std::getenv("XERENGE_VR_FRAMELOG") != nullptr;
+  if (frame_log && ctx.r3.u32 == g_camera_frame.load(std::memory_order_relaxed)) {
+    static std::mutex m;
+    static std::map<uint32_t, uint32_t> callers;
+    static auto since = std::chrono::steady_clock::now();
+    std::scoped_lock lock{m};
+    ++callers[lr];
+    if (std::chrono::steady_clock::now() - since > std::chrono::seconds(2)) {
+      std::string text;
+      for (const auto& [caller, n] : callers) {
+        text += fmt::format(" {:08X}x{}", caller, n);
       }
-      const float* s = CameraAxes().s;
-      // The camera's axes as OpenXR's seat axes (x right, y up, z back): right, up, -at.
-      float seat[3][3];
-      for (int c = 0; c < 3; ++c) {
-        seat[0][c] = s[0] * rows[0][c];
-        seat[1][c] = s[1] * rows[1][c];
-        seat[2][c] = s[2] * rows[2][c];
-      }
-      float out[3][3];
-      for (int r = 0; r < 3; ++r) {
-        for (int c = 0; c < 3; ++c) {
-          out[r][c] = t_pose[r * 4 + 0] * seat[0][c] + t_pose[r * 4 + 1] * seat[1][c] + t_pose[r * 4 + 2] * seat[2][c];
-        }
-      }
-      for (int c = 0; c < 3; ++c) {
-        StoreFloat(base, m + 0 + 4 * c, s[0] * out[0][c]);
-        StoreFloat(base, m + 16 + 4 * c, s[1] * out[1][c]);
-        StoreFloat(base, m + 32 + 4 * c, s[2] * out[2][c]);
-        StoreFloat(base, m + 48 + 4 * c,
-                   rows[3][c] + t_pose[12] * seat[0][c] + t_pose[13] * seat[1][c] + t_pose[14] * seat[2][c]);
-      }
-      vr::NoteCameraPose(t_pose, t_tangents);
-      static int logged = 0;  // development: the first few cameras posed
-      if (logged < 6 || std::getenv("XERENGE_VR_CAMLOG")) {
-        ++logged;
-        REXLOG_INFO("VR camera: viewport {:08X} right {:.3f} {:.3f} {:.3f} up {:.3f} {:.3f} {:.3f} at {:.3f} {:.3f} {:.3f} "
-                    "pos {:.2f} {:.2f} {:.2f} -> at {:.3f} {:.3f} {:.3f}",
-                    ctx.r30.u32, rows[0][0], rows[0][1], rows[0][2], rows[1][0], rows[1][1], rows[1][2], rows[2][0],
-                    rows[2][1], rows[2][2], rows[3][0], rows[3][1], rows[3][2], LoadFloat(base, m + 32),
-                    LoadFloat(base, m + 36), LoadFloat(base, m + 40));
+      REXLOG_INFO("VR camera frame {:08X} read by{}", ctx.r3.u32, text);
+      callers.clear();
+      since = std::chrono::steady_clock::now();
+    }
+  }
+  if (lr == kViewportUpdateMatrixCaller) {
+    g_camera_frame.store(ctx.r3.u32, std::memory_order_relaxed);
+    if (vr::Active()) {
+      // The pose this frame is built with; the view window (next) takes the headset's field of view.
+      t_posed = vr::HeadPose(t_pose, t_tangents);
+      if (t_posed) {
+        const float h = std::max(-t_tangents[0], t_tangents[1]), v = std::max(t_tangents[2], -t_tangents[3]);
+        t_tangents[0] = -h;
+        t_tangents[1] = h;
+        t_tangents[2] = v;
+        t_tangents[3] = -v;
+        std::scoped_lock lock{g_pose_mutex};
+        std::memcpy(g_pose, t_pose, sizeof(g_pose));
+        std::memcpy(g_tangents, t_tangents, sizeof(g_tangents));
+        g_posed = true;
       }
     }
+    __imp__sub_820FBE60(ctx, base);
+    return;
+  }
+  if (RendererCameraRead(lr) && ctx.r3.u32 == g_camera_frame.load(std::memory_order_relaxed) && vr::Active()) {
+    float pose[16];
+    bool posed;
+    {
+      std::scoped_lock lock{g_pose_mutex};
+      posed = g_posed;
+      std::memcpy(pose, g_pose, sizeof(pose));
+    }
+    __imp__sub_820FBE60(ctx, base);
+    if (!posed) {
+      return;
+    }
+    // A copy of the matrix and the LTM 64 bytes on, each turned by the head, in place of the frame's.
+    static uint32_t copy = 0;
+    if (!copy) {
+      copy = REX_KERNEL_MEMORY()->SystemHeapAlloc(128, 16);
+    }
+    std::memcpy(xerenge::GuestPointer(base, copy), xerenge::GuestPointer(base, ctx.r3.u32), 128);
+    PoseRwMatrix(base, copy, pose);
+    PoseRwMatrix(base, copy + 64, pose);
+    ctx.r3.u64 = copy;
+    static int logged = 0;
+    if (logged < 3 || std::getenv("XERENGE_VR_CAMLOG")) {
+      ++logged;
+      REXLOG_INFO("VR camera: renderer read {:08X} from {:08X}: at {:.3f} {:.3f} {:.3f} -> {:.3f} {:.3f} {:.3f}",
+                  ctx.r3.u32, lr, LoadFloat(base, copy + 64 + 32), LoadFloat(base, copy + 64 + 36),
+                  LoadFloat(base, copy + 64 + 40), LoadFloat(base, copy + 32), LoadFloat(base, copy + 36),
+                  LoadFloat(base, copy + 40));
+    }
+    vr::NoteCameraPose(pose, g_tangents);
+    return;
   }
   __imp__sub_820FBE60(ctx, base);
 }

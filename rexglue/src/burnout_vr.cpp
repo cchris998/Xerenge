@@ -114,6 +114,15 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
   if (!std::getenv("MCLA_VR_HUD_VS")) {
     _putenv_s("MCLA_VR_HUD_VS", "BCEC88072A5F344D,30B5339A49CB9B5B,B2352AFC8C60D6B7,D25CBA074BB11277");
   }
+  // DLSS's inputs: the scene is drawn in three tiles at 2x MSAA (each tile's depth rows at its resolve, sample 0), and
+  // the static world's vertex shaders draw with the camera's view-projection as their WVP (the world at the identity:
+  // the camera, and the others' worlds from it for their own motion). Set by hand wins.
+  if (!std::getenv("MCLA_VR_DLSS_TILES")) {
+    _putenv_s("MCLA_VR_DLSS_TILES", "1");
+  }
+  if (!std::getenv("MCLA_VR_CAMERA_VS")) {
+    _putenv_s("MCLA_VR_CAMERA_VS", "C3FF17490757589F,1A563CA9A421178A,ACB68BA117ABC107");
+  }
   config.graphics = rex::system::LoadGpuPlugin("xenos", "vulkan");
   if (!config.graphics) {
     REXLOG_ERROR("VR: could not load the xenos GPU plugin with the Vulkan backend");
@@ -156,6 +165,14 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
   if (!std::getenv("XERENGE_NO_MOTION_BLUR") &&
       !xerenge::settings::ConfString("motion_blur", "true").starts_with("true")) {
     _putenv_s("XERENGE_NO_MOTION_BLUR", "1");
+  }
+  // DLSS (VR DLSS, vr_dlss: off, dlaa, or an upscale 1.5 / 2 of the eye size for the headset).
+  if (!from_command_line("vr_dlss") && !from_command_line("vr_dlss_output_scale")) {
+    const std::string dlss = xerenge::settings::ConfString("vr_dlss", "off");
+    if (dlss == "dlaa" || dlss == "1.5" || dlss == "2") {
+      rex::cvar::SetFlagByName("vr_dlss", "true");
+      rex::cvar::SetFlagByName("vr_dlss_output_scale", dlss == "dlaa" ? "1.0" : dlss.c_str());
+    }
   }
   // The frame cap (VR FRAME CAP, vr_frame_cap: 1 off, 2 half the refresh, 3 a third).
   if (!from_command_line("vr_frame_cap")) {

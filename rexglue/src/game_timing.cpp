@@ -114,6 +114,18 @@ bool FramesLockedTo30() {
 bool g_doubled_this_frame = false;
 bool g_doubled_next_frame = false;
 
+// A button's event the menus hand to the interface (sub_821F5B10 posting through sub_82427030) is taken only if the
+// frame it is read on runs a logic step and so does the frame after it. Each frame was a step at sixty frames a
+// second; on the wall clock at 120 frames a second and up a step comes one frame in two or three, never two in a
+// row, and the event intro's Continue ignored A (at 72, one press in six was lost). Forced patterns at 180 Hz: steps
+// on every frame or in pairs of frames took the press, steps on the frame before each read lost the title's Start,
+// strict alternation at 72 lost the intro's A. So after an event the next frame is given a step if the timer gave it
+// none: written into the main loop's step count (g_step_count_slot, the caller's 160(r1) the timer's result is
+// stored to) and counted in the timer's account, so the clock is not moved.
+int g_menu_input_depth = 0;
+bool g_menu_event = false;
+uint32_t g_step_count_slot = 0;
+
 uint32_t LoadU32(const uint8_t* base, uint32_t address) {
   return xerenge::LoadGuestU32(base, address);
 }
@@ -129,6 +141,7 @@ extern "C" void __imp__sub_82363E68(PPCContext& __restrict, uint8_t*);
 // sub_82363E68(timer, min_steps, max_steps) -> steps to run next frame.
 REX_HOOK_RAW(sub_82363E68) {
   const uint32_t timer = ctx.r3.u32;
+  g_step_count_slot = xerenge::LoadGuestU32(base, ctx.r1.u32 + 160);
   xerenge::vr_port::PaceFrame();  // VR: one game frame per headset frame
   g_doubled_this_frame = g_doubled_next_frame;
   g_doubled_next_frame = false;
@@ -178,6 +191,19 @@ REX_HOOK_RAW(sub_82363E68) {
     const double seconds = std::chrono::duration<double>(now - last).count();
     last = now;
     g_frame_scale = std::clamp(seconds * 60.0, 0.0, 4.0);
+    // Paused (+0x34, the race's pause menu): the timer stops its account and hands back the minimum - one step a
+    // frame frame-locked, which kept the pause menu running, but 0 on the wall clock, and the pause menu never
+    // appeared or took a press (the race stayed frozen behind it). Steps sixty a second by the wall clock instead,
+    // outside the timer's account: paused time is not race time.
+    static double paused_steps = 0.0;
+    if (LogicFollowsWallClock() && timer >= 0x10000 && timer < 0xA0000000u && LoadU32(base, timer + 0x34) != 0) {
+      paused_steps = std::min(paused_steps + seconds * 60.0, 2.0);
+      const uint32_t steps = uint32_t(paused_steps);
+      paused_steps -= steps;
+      ctx.r3.u64 = std::max(ctx.r3.u32, steps);
+    } else {
+      paused_steps = 0.0;
+    }
   }
   g_steps_this_frame = g_steps_next_frame;
   g_steps_next_frame = ctx.r3.u32;
@@ -243,7 +269,33 @@ REX_HOOK_RAW(sub_821F5B10) {
   if (LogicFollowsWallClock() && g_steps_this_frame == 0) {
     return;
   }
+  g_menu_event = false;
+  ++g_menu_input_depth;
   __imp__sub_821F5B10(ctx, base);
+  --g_menu_input_depth;
+  const uint32_t slot = g_step_count_slot;
+  const uint32_t timer = g_clock_timer;
+  if (g_menu_event && LogicFollowsWallClock() && g_steps_next_frame == 0 && slot >= 0x10000 &&
+      timer >= 0x10000 && timer < 0xA0000000u && LoadU32(base, slot) == 0) {
+    xerenge::StoreGuestU32(base, slot, 1u);
+    if (LoadU32(base, timer + 0x34) == 0) {
+      xerenge::StoreGuestU32(base, timer + 0x28, LoadU32(base, timer + 0x28) + 1);
+    }
+    g_steps_next_frame = 1;
+    static uint32_t shown = 0;
+    if (shown++ < 8) {
+      REXLOG_INFO("game timing: a menu event - the next frame given a step");
+    }
+  }
+}
+
+// The interface's event post; from inside the menus' input, a button's event (see g_menu_event).
+extern "C" void __imp__sub_82427030(PPCContext& __restrict, uint8_t*);
+REX_HOOK_RAW(sub_82427030) {
+  if (g_menu_input_depth > 0) {
+    g_menu_event = true;
+  }
+  __imp__sub_82427030(ctx, base);
 }
 
 // The frame time the title's systems ask for (0x8210B3C8): a sixtieth of a

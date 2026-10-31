@@ -501,6 +501,23 @@ REX_HOOK_RAW(sub_820FBE60) {
       posed = g_posed;
       std::memcpy(pose, g_pose, sizeof(pose));
     }
+    {  // The head's pose taken again for each frame drawn (once a frame: its three reads), not only at CGtViewport::Update:
+       // that runs once a logic step, 60 a second, and at 90 Hz every third frame was drawn with the last one's head
+       // (simulator, smooth head sweep: per-frame turn 1.2, 0.6, 0 degrees; Matt 2026-10-31: "Turning my head still makes
+       // the camera jerky in the car selection screen", in races the world moved with the head then snapped back).
+      static uint64_t pose_frame = ~0ull;
+      static float frame_pose[16];
+      static bool frame_posed = false;
+      if (pose_frame != vr::GameSwapCount()) {
+        pose_frame = vr::GameSwapCount();
+        float tangents[4];
+        frame_posed = vr::HeadPoseNow(frame_pose, tangents);
+      }
+      if (frame_posed) {
+        std::memcpy(pose, frame_pose, sizeof(pose));
+        posed = true;
+      }
+    }
     __imp__sub_820FBE60(ctx, base);
     if (!posed) {
       return;
@@ -532,6 +549,16 @@ REX_HOOK_RAW(sub_820FBE60) {
                   ctx.r3.u32, lr, LoadFloat(base, copy + 64 + 32), LoadFloat(base, copy + 64 + 36),
                   LoadFloat(base, copy + 64 + 40), LoadFloat(base, copy + 32), LoadFloat(base, copy + 36),
                   LoadFloat(base, copy + 40));
+    }
+    if (static const bool pose_log = std::getenv("XERENGE_VR_POSELOG") != nullptr; pose_log) {  // development
+      static uint64_t logged_frame = ~0ull;
+      if (logged_frame != vr::GameSwapCount()) {
+        logged_frame = vr::GameSwapCount();
+        REXLOG_INFO("VR pose drawn: frame {} at {} us, yaw {:.3f} degrees", logged_frame,
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count(),
+                    std::atan2(-pose[8], pose[10]) * 57.29578f);
+      }
     }
     vr::NoteCameraPose(pose, g_tangents);
     return;

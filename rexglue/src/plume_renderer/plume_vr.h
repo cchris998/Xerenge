@@ -35,6 +35,14 @@ void NoteFramePresented();
 /// Whether the vertex shader (plume's shader hash, or the microcode's) is one of the HUD's (MCLA_VR_HUD_VS, the
 /// microcode hashes the SDK's xenos path splits at; burnout_vr.cpp sets the title's).
 bool HudVertexShader(uint64_t vs_hash);
+
+// A HUD draw's blend control (after the split, over transparent black): alpha SRC_ALPHA becomes ONE, so the layer's
+// alpha is the HUD's coverage (a + (1 - a) under), as the xenos path does. Else as given.
+uint32_t HudBlendControl(uint32_t blend_control);
+
+// A HUD draw's colour write mask: one that blends over (colour dest ONE_MINUS_SRC_ALPHA) but leaves alpha out writes
+// alpha too, so it covers what is under it in the layer (else it is added on top: bars washed out, dark backings gone).
+uint32_t HudColorMask(uint32_t color_mask, uint32_t blend_control);
 /// The present worker, before the frame's draws are encoded: the frame's pose (NoteFramePresented's, in order).
 void BeginFrame();
 /// Encoding the frame's draws, at its first interface draw: the scene (`target`, both eyes, in COLOR_WRITE, outside a

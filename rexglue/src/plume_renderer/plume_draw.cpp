@@ -7907,10 +7907,22 @@ void PlumeDrawContext::EncodeDraws(plume::RenderCommandList* list,
     // the register state the snapshot happened to carry, alpha stayed at the
     // clear's zero and the menu drew the video invisible - black.
     const bool opaque_video = targets_followed && snap.has_video_frame();
-    const uint32_t blend_control =
+    uint32_t blend_control =
         opaque_video ? 0x00010001u
                      : (snap.blend_control ? snap.blend_control : kDefaultBlendControl);
-    const uint32_t draw_color_mask = opaque_video ? 0xFu : snap.color_mask;
+    if (vr_hud_split) blend_control = vr::HudBlendControl(blend_control);  // VR fork: the HUD layer's coverage
+    if (vr_hud_split && std::getenv("XERENGE_VR_HUD_LOG")) {  // VR fork, development: the HUD's draws
+      static std::mutex seen_mutex;
+      static std::set<std::tuple<uint64_t, uint64_t, uint32_t, uint32_t>> seen;
+      std::scoped_lock seen_lock{seen_mutex};
+      if (seen.size() < 200 && seen.insert({snap.vs_hash, snap.ps_hash, snap.blend_control, snap.color_mask}).second) {
+        REXLOG_INFO("VR HUD draw: vs {:016X} ps {:016X} blend {:08X} -> {:08X} mask {:X} d3d {} prim {} n {}",
+                    snap.vs_hash, snap.ps_hash, snap.blend_control, blend_control, snap.color_mask,
+                    snap.d3d_vertex_buffer != 0, snap.prim_type, snap.num_indices);
+      }
+    }
+    uint32_t draw_color_mask = opaque_video ? 0xFu : snap.color_mask;
+    if (vr_hud_split) draw_color_mask = vr::HudColorMask(draw_color_mask, blend_control);  // VR fork: coverage
     // One line per distinct depth state seen. Whether a draw wants the depth
     // test is what separates the scene from the interface here, so it matters
     // a great deal whether that register is arriving at all, or arriving with
@@ -8018,8 +8030,8 @@ void PlumeDrawContext::EncodeDraws(plume::RenderCommandList* list,
     if (wants_depth) {
       EncodeStage("building the pipeline");
       pipeline = GetOrCreatePipeline(snap.vs_hash, snap.ps_hash, topology, blend_control,
-                                     snap.rt1_bound ? snap.color_mask
-                                                    : (snap.color_mask & 0xFu),
+                                     snap.rt1_bound ? draw_color_mask
+                                                    : (draw_color_mask & 0xFu),
                                      snap.depth_control, snap.alpha_test, snap.poly_offset, snap.cull);
       passthrough = pipeline == nullptr;
     }

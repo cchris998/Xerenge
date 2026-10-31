@@ -12,6 +12,7 @@
  */
 #include "plume_renderer/plume_vr.h"
 #include "plume_renderer/plume_shader_cache.h"
+#include "plume_renderer/plume_postfx.h"
 #include "shader_cache.h"
 
 #include <array>
@@ -149,6 +150,31 @@ void NoteFramePresented() {
   }
 }
 
+uint32_t HudBlendControl(uint32_t blend_control) {
+  // RB_BLENDCONTROL: alpha_srcblend in bits 16-20 (xenos::BlendFactor: kSrcAlpha 6, kOne 1). The game blends its HUD for a
+  // picture; over the cleared target the alpha it leaves is the layer's coverage. With SRC_ALPHA it was a squared: the
+  // panels' dark backings (a 0.6: 0.36) and the tinted bars came out faint or washed (Burnout 2026-10-31: the race's
+  // boost bar pale, the rating's OK and the speed panel's backing missing, the event card without its box).
+  static const bool off = std::getenv("XERENGE_VR_HUD_COVERAGE") && std::getenv("XERENGE_VR_HUD_COVERAGE")[0] == '0';
+  if (off || ((blend_control >> 16) & 0x1Fu) != 6u) {
+    return blend_control;
+  }
+  return (blend_control & ~(0x1Fu << 16)) | (1u << 16);
+}
+
+uint32_t HudColorMask(uint32_t color_mask, uint32_t blend_control) {
+  // Burnout's race HUD (2026-10-31): its bars, numbers and the panels' dark backings blend SRC_ALPHA /
+  // ONE_MINUS_SRC_ALPHA with RGB written only (mask 7). Over the cleared target their alpha stayed 0 and the
+  // compositor added their colour to the scene: the boost bar pale pink on the sky, the timer white, the backings
+  // gone. Additive draws (dest ONE) stay as they are: alpha 0 is what adding is in a premultiplied layer.
+  static const bool off = std::getenv("XERENGE_VR_HUD_COVERAGE") && std::getenv("XERENGE_VR_HUD_COVERAGE")[0] == '0';
+  const uint32_t color_dest = (blend_control >> 8) & 0x1Fu;  // xenos::BlendFactor: kOneMinusSrcAlpha 7
+  if (off || color_dest != 7u || (color_mask & 0x7u) == 0 || (color_mask & 0x8u) != 0) {
+    return color_mask;
+  }
+  return color_mask | 0x8u;
+}
+
 bool HudVertexShader(uint64_t vs_hash) {
   static const std::unordered_set<uint64_t> hashes = [] {
     std::unordered_set<uint64_t> set;
@@ -237,6 +263,7 @@ void Submit(plume::RenderDevice* device, plume::RenderCommandQueue* queue, plume
   if (g_split) {
     xr::HudCaptured();  // the HUD's picture, copied below, goes with the split frame
   }
+  xr::SetSceneSharpening(GetSharpening());  // flat plume's sharpening (its own pass reads one layer), per eye
   int screen = xr::BeginFrame(width, height);
   const bool split = screen <= -2;  // its scene is on screen -2 - screen (SplitAtInterface), the HUD to copy
   if (split) {

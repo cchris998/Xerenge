@@ -116,6 +116,14 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
   }
   if (renderer == "plume") {
     _putenv_s("XERENGE_VR_PLUME", "1");
+    // The sharpening from xerenge.conf, as the launcher sets it (burnout.exe started directly in VR had none, where the
+    // flat game had the menu's MEDIUM): the headset's scene is sharpened per eye with it (plume_vr.cpp).
+    if (!std::getenv("XERENGE_SHARPEN")) {
+      const std::string sharpen = xerenge::settings::ConfString("sharpen", "");
+      if (!sharpen.empty()) {
+        _putenv_s("XERENGE_SHARPEN", sharpen.c_str());
+      }
+    }
     // plume's switches, as the launcher and run.sh set them for it.
     for (const char* name : {"XERENGE_D3D_TARGETS", "XERENGE_D3D_UI", "XERENGE_REAL_SHADERS", "XERENGE_D3D_DRAWS",
                              "XERENGE_SECONDARY_TICKS"}) {

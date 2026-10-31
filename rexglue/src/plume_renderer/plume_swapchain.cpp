@@ -160,6 +160,12 @@ void FrameSize(uint32_t window_width, uint32_t window_height, uint32_t* width,
   uint32_t requested_width = 0;
   uint32_t requested_height = 0;
   RequestedRenderResolution(&requested_width, &requested_height);
+  if (vr::Requested() && requested_width != 0) {  // VR fork: the eye size as set, not the window's shape (plume_vr.cpp)
+    *scaled = scene_wanted && (requested_width != window_width || requested_height != window_height);
+    *width = *scaled ? requested_width : window_width;
+    *height = *scaled ? requested_height : window_height;
+    return;
+  }
   if (Boxed(window_width, window_height) && requested_width == 0) {
     // "The device's" resolution in an allowed shape (16:9 when kept so): as
     // much of the screen as that shape fills.

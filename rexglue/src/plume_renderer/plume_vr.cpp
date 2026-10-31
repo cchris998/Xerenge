@@ -11,6 +11,7 @@
  * the frame's present, on the same thread, takes it for the frame.
  */
 #include "plume_renderer/plume_vr.h"
+#include "plume_renderer/plume_draw.h"
 #include "plume_renderer/plume_shader_cache.h"
 #include "plume_renderer/plume_postfx.h"
 #include "shader_cache.h"
@@ -46,6 +47,7 @@ struct FramePose {
   double state = 0.0;
   float t = 1.f;
   uint64_t serial = 0;
+  std::chrono::steady_clock::time_point taken{};  // when its pose was taken (the headset's look-ahead measure)
 };
 std::mutex g_pose_mutex;
 std::deque<FramePose> g_poses;  // presented frames' poses, in order, for the submissions
@@ -143,19 +145,65 @@ void AfterDevice(plume::RenderInterface* render_interface, plume::RenderDevice* 
               queues.reserved);
 }
 
-void NoteFramePresented() {
-  if (!g_active) {
-    return;
+namespace {
+// The game frame just built: its pose and logic moment, taken once (by its Swap marker or its present, whichever
+// comes first) and kept by serial, so the present that draws it uses its own (UseFramePoseOf). The queue the
+// presents fill was the only link before: when plume's present ran behind, or took two game frames in one batch, the
+// frame drawn got a pose three frames old (the stats' "3.0 poses waiting") - the markers and sparks trailed a head
+// turn and caught up, and the headset was told the wrong pose (Matt 2026-10-31).
+std::mutex g_frame_poses_mutex;
+std::array<FramePose, 16> g_frame_poses;
+FramePose g_last_built;
+uint64_t g_last_built_swaps = ~0ull;
+FramePose g_selected;
+bool g_selected_valid = false;
+
+FramePose TakeBuiltFrame() {
+  std::scoped_lock lock{g_frame_poses_mutex};
+  const uint64_t swaps = xr::GameSwapCount();
+  if (swaps == g_last_built_swaps) {
+    return g_last_built;
   }
   FramePose frame;
+  frame.taken = xr::CameraPoseTime();
   frame.posed = xr::TakeCameraPose(*reinterpret_cast<float(*)[16]>(frame.pose),
                                    *reinterpret_cast<float(*)[4]>(frame.tangents));
   // Named while the frame was built (burnout_vr.cpp InterpolateCamera, keyed by the swaps before its own).
-  const uint64_t swaps = xr::GameSwapCount();
   frame.interpolated = xr::FrameInterpolation(swaps, frame.state, frame.t) ||
                        (swaps && xr::FrameInterpolation(swaps - 1, frame.state, frame.t));
   static uint64_t serial = 0;
   frame.serial = ++serial;
+  g_frame_poses[frame.serial % g_frame_poses.size()] = frame;
+  g_last_built = frame;
+  g_last_built_swaps = swaps;
+  return frame;
+}
+}  // namespace
+
+uint32_t NoteFrameEnd() {
+  if (!g_active) {
+    return 0;
+  }
+  return uint32_t(TakeBuiltFrame().serial);
+}
+
+void UseFramePose(uint32_t serial) {
+  if (!g_active || serial == 0) {
+    return;
+  }
+  std::scoped_lock lock{g_frame_poses_mutex};
+  const FramePose& frame = g_frame_poses[serial % g_frame_poses.size()];
+  if (frame.serial == serial) {
+    g_selected = frame;
+    g_selected_valid = true;
+  }
+}
+
+void NoteFramePresented() {
+  if (!g_active) {
+    return;
+  }
+  const FramePose frame = TakeBuiltFrame();
   std::scoped_lock lock{g_pose_mutex};
   g_poses.push_back(frame);
   while (g_poses.size() > 4) {
@@ -308,52 +356,41 @@ struct Interpolation {
   uint32_t vp_width = 0;
   uint32_t draws = 0, interpolated = 0, paired = 0, found = 0, states = 0;  // development
   float max_move = 0.f;
+  std::vector<std::array<float, 3>> objects;  // development: this frame's draws' origins (ndc x, y, w) (MARKERTRACE)
   float track_w = 0.f, track[4]{};  // development: the nearest moving draw's origin on screen (XERENGE_VR_INTERPTRACK)
   float sample[16]{};
 } g_interpolation;
 }  // namespace
 
-namespace {
-// The game camera's depth: depth-buffer value z = a + b / view depth (its projection: VP's z row = a w row + b e3),
-// from the static world's draws (MCLA_VR_CAMERA_VS).
-std::atomic<float> g_depth_a{0.f}, g_depth_b{0.f};
-void NoteCameraDepth(const float* c) {
-  int k = 0;
-  for (int i = 1; i < 3; ++i) {
-    k = std::fabs(c[12 + i]) > std::fabs(c[12 + k]) ? i : k;
-  }
-  if (std::fabs(c[12 + k]) < 1e-4f) {
-    return;
-  }
-  const float a = c[8 + k] / c[12 + k];
-  g_depth_a.store(a, std::memory_order_relaxed);
-  g_depth_b.store(c[11] - a * c[15], std::memory_order_relaxed);
-}
-}  // namespace
-
 bool g_marker_run = true;  // the frame's 2D draws so far are all markers (BeginFrame)
+bool g_marker_started = false;  // and the first of them was a triangle
 
-bool MarkerDraw(uint64_t vs_hash, uint64_t ps_hash, const float* c) {
+bool MarkerDraw(uint64_t vs_hash, uint64_t ps_hash, uint32_t count, const float* c) {
   static const bool off = std::getenv("XERENGE_VR_MARKERS") && std::getenv("XERENGE_VR_MARKERS")[0] == '0';
   if (off || !Stereo() || !g_marker_run || !HudVertexShader(vs_hash)) {
     return false;
   }
   // The frame's first 2D draws, flat colour (the triangles, the position label's shapes), each with its car's depth
-  // value in gPosOffset.z (past 0.85, 3.3 m). The run ends at the first other 2D draw: the race HUD (z ~0) or the pause
-  // menu (textured) - the game leaves z as the last marker set it, and the pause menu's panels carried it.
+  // value in gPosOffset.z (past 0.5, 2 m), starting with a triangle. The run ends at the first other 2D draw: the race
+  // HUD (z ~0) or the pause menu (textured) - the game leaves z as the last marker set it, and the pause menu's panels
+  // carried it.
   constexpr uint64_t kFlatColourPs = 0x6EB945B547506423ull;
-  const bool marker = ps_hash == kFlatColourPs && std::fabs(c[3] - 1.f) < 1e-5f && c[2] > 0.85f && c[2] < 1.f &&
-                      c[4] > 0.f && c[5] < 0.f && g_depth_b.load(std::memory_order_relaxed) != 0.f;
+  const bool marker = ps_hash == kFlatColourPs && std::fabs(c[3] - 1.f) < 1e-5f && c[2] > 0.5f && c[2] < 1.f &&
+                      c[4] > 0.f && c[5] < 0.f && (g_marker_started || count == 3);
+  g_marker_started = marker;
   g_marker_run = marker;
   return marker;
 }
 
 void PlaceMarker(float* c, const float* centre) {
-  const float a = g_depth_a.load(std::memory_order_relaxed), b = g_depth_b.load(std::memory_order_relaxed);
-  if (std::fabs(c[2] - a) < 1e-6f) {
+  // The markers' depth value is the game's with a 1 m near plane, z = 1 - 1/depth: taken as the camera's (0.5 m) they
+  // came out at half their cars' distance (simulator race, each marker against the object below it: 0.49-0.51 from 40
+  // to 200 m) - the eyes put them nearer, toward the middle of the view, and a sway moved them off their cars (Matt
+  // 2026-10-31).
+  if (c[2] >= 1.f) {
     return;
   }
-  float depth = b / (c[2] - a);
+  float depth = 1.f / (1.f - c[2]);
   if (!(depth > 0.1f && depth < 100000.f)) {
     return;
   }
@@ -362,9 +399,30 @@ void PlaceMarker(float* c, const float* centre) {
   // view window), turned as the view-space draws are (TurnViewSpaceDraw), projected again; the marker moved by the
   // difference, its depth the turned one.
   const FramePose& frame = g_frame;
-  if (centre && frame.posed && frame.tangents[1] > 0.f && frame.tangents[2] > 0.f) {
+  static const bool turn = !(std::getenv("XERENGE_VR_MARKER_TURN") && std::getenv("XERENGE_VR_MARKER_TURN")[0] == '0');
+  if (turn && centre && frame.posed && frame.tangents[1] > 0.f && frame.tangents[2] > 0.f) {
     const float sx = 1.f / frame.tangents[1], sy = 1.f / frame.tangents[2];
     const float nx = centre[0] * c[4] + c[0], ny = centre[1] * c[5] + c[1];
+    if (static const bool log = std::getenv("XERENGE_VR_MARKERTRACE") != nullptr; log) {  // development
+      static uint64_t traced = 0;
+      if (traced != frame.serial) {
+        traced = frame.serial;
+        // The nearest object below it on screen (its car): its origin's distance.
+        float best = 1e9f, best_w = 0.f, bx = 0.f, by = 0.f;
+        {
+          std::scoped_lock lock{g_interpolation.mutex};
+          for (const auto& o : g_interpolation.objects) {
+            const float dx = o[0] - nx, dy = o[1] - ny;
+            if (dy < 0.f && dy > -0.2f && std::fabs(dx) < best) {
+              best = std::fabs(dx), best_w = o[2], bx = o[0], by = o[1];
+            }
+          }
+        }
+        REXLOG_INFO("VR marker trace: frame {} game ndc {:.4f} {:.4f} depth {:.1f} head yaw {:.2f}; nearest object below "
+                    "at {:.4f} {:.4f} w {:.1f}", frame.serial, nx, ny, depth,
+                    std::atan2(-frame.pose[8], frame.pose[10]) * 57.29578f, bx, by, best_w);
+      }
+    }
     float p[16] = {sx, 0.f, 0.f, 0.f, 0.f, sy, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 1.f, 0.f};
     TurnViewSpaceDraw(p);
     const float v[4] = {nx * depth / sx, ny * depth / sy, depth, 1.f};
@@ -381,6 +439,20 @@ void PlaceMarker(float* c, const float* centre) {
     ++unknown;
     REXLOG_INFO("VR marker: no centre ({}), not turned with the head", centre ? "unposed" : "not unpacked here");
   }
+  // Close by (the car beside you) the marker is between the eyes and the car, and filled the view: hidden, all its
+  // vertices on one point past the far plane (Matt 2026-10-31: "When a car is very close to me the screen goes dark
+  // and the marker breaks ... Hide the markers that are close to me"). XERENGE_VR_MARKER_MIN_M sets the distance.
+  static const float min_depth = [] {
+    const char* v = std::getenv("XERENGE_VR_MARKER_MIN_M");
+    return v ? float(std::atof(v)) : 10.f;
+  }();
+  if (depth < min_depth) {
+    c[0] = c[1] = 0.f;
+    c[2] = 2.f;
+    c[3] = 1.f;
+    c[4] = c[5] = 0.f;
+    return;
+  }
   for (int i = 0; i < 4; ++i) {
     c[i] *= depth;
   }
@@ -388,15 +460,12 @@ void PlaceMarker(float* c, const float* centre) {
   c[5] *= depth;
   if (static int logged = 0; logged < 8 || std::getenv("XERENGE_VR_MARKERLOG")) {  // development
     ++logged;
-    REXLOG_INFO("VR marker: depth value {:.5f} -> {:.1f} m (a {:.5f} b {:.5f})", c[2] / depth, depth, a, b);
+    REXLOG_INFO("VR marker: depth value {:.5f} -> {:.1f} m", c[2] / depth, depth);
   }
 }
 
 bool InterpolateDraw(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uint32_t target_width, const float* c,
                      float* wvp_out) {
-  if (Stereo() && CameraVertexShader(vs_hash)) {
-    NoteCameraDepth(c);
-  }
   const FramePose& frame = g_frame;
   if (!Stereo() || !frame.posed || !frame.interpolated || !depth_tested) {
     return false;
@@ -409,6 +478,7 @@ bool InterpolateDraw(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uin
   Interpolation& vi = g_interpolation;
   std::scoped_lock lock{vi.mutex};
   if (frame.serial != vi.serial) {  // the frame's first scene draw
+    vi.objects.clear();
     if (static const bool track = std::getenv("XERENGE_VR_INTERPTRACK") != nullptr; track && vi.track_w > 0.f) {
       REXLOG_INFO("VR interpolation track: t {:.3f} screen {:.4f} {:.4f} (as drawn by the state {:.4f} {:.4f}) depth {:.2f}",
                   frame.t, vi.track[0], vi.track[1], vi.track[2], vi.track[3], vi.track_w);
@@ -452,6 +522,9 @@ bool InterpolateDraw(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uin
   }
   if (!vi.have_vp || target_width != vi.vp_width) {
     return false;  // before the camera's first draw, or another target (shadows, reflections)
+  }
+  if (static const bool trace = std::getenv("XERENGE_VR_MARKERTRACE") != nullptr; trace && c[15] > 1.f && vi.objects.size() < 4096) {
+    vi.objects.push_back({c[3] / c[15], c[7] / c[15], c[15]});  // development
   }
   float world[16];
   Multiply4(vi.vp_inverse, c, world);
@@ -663,6 +736,7 @@ void BeginFrame() {
   g_frame = {};
   g_split = false;
   g_marker_run = true;
+  g_marker_started = false;
   {
     std::scoped_lock lock{g_pose_mutex};
     if (!g_poses.empty()) {
@@ -670,8 +744,25 @@ void BeginFrame() {
       g_poses.pop_front();
     }
   }
+  {  // the pose of the game frame this present draws, when its Swap marker named it
+    std::scoped_lock lock{g_frame_poses_mutex};
+    static uint32_t frames = 0, own = 0;  // development: how many found their own
+    own += g_selected_valid ? 1 : 0;
+    if (++frames == 900) {
+      REXLOG_INFO("plume VR: {} of {} frames drawn with their own frame's pose (the rest: the presents' queue)", own,
+                  frames);
+      frames = own = 0;
+    }
+    if (g_selected_valid) {
+      g_frame = g_selected;
+      g_selected_valid = false;
+      std::scoped_lock pose_lock{g_pose_mutex};
+      g_poses.clear();
+    }
+  }
   xr::SetPresentPose(g_frame.posed, *reinterpret_cast<const float(*)[16]>(g_frame.pose),
                      *reinterpret_cast<const float(*)[4]>(g_frame.tangents));
+  xr::SetPresentPoseTime(g_frame.taken);
   xr::SetFrameHasScene(g_frame.posed);
 }
 

@@ -5,6 +5,11 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
+
+namespace rex::plume_renderer {
+struct GuestDrawSnapshot;
+}  // namespace rex::plume_renderer
 
 namespace plume {
 struct RenderInterface;
@@ -32,6 +37,11 @@ void BeforeInterface();
 void AfterDevice(plume::RenderInterface* render_interface, plume::RenderDevice* device);
 /// The game's thread, at a frame's present (it drew the frame): the pose its camera was read with.
 void NoteFramePresented();
+/// The game's thread, at its Swap: the frame's pose kept under a serial for the Swap marker (GuestDrawSnapshot
+/// vr_pose_serial; 0 when VR is off).
+uint32_t NoteFrameEnd();
+/// The present, taking a Swap marker into its batch: the frame it draws (its last) gets that frame's pose (BeginFrame).
+void UseFramePose(uint32_t serial);
 /// Whether the vertex shader (plume's shader hash, or the microcode's) is one of the HUD's (MCLA_VR_HUD_VS, the
 /// microcode hashes the SDK's xenos path splits at; burnout_vr.cpp sets the title's).
 bool HudVertexShader(uint64_t vs_hash);
@@ -49,7 +59,7 @@ bool InterfaceSplit();
 // 2026-10-31: "they should be the depth of each car they relate to"). They stay in the scene: PlaceMarker scales c0 and
 // c1.xy by the car's view depth (from the game camera's projection), the same place on screen with w = that depth, so
 // the eyes' clip shift puts them at it.
-bool MarkerDraw(uint64_t vs_hash, uint64_t ps_hash, const float* vs_constants);
+bool MarkerDraw(uint64_t vs_hash, uint64_t ps_hash, uint32_t count, const float* vs_constants);
 void PlaceMarker(float* vs_constants, const float* centre_pixels);
 
 // A HUD draw's blend control (after the split, over transparent black): alpha SRC_ALPHA becomes ONE, so the layer's

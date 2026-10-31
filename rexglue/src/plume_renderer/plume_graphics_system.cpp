@@ -1564,6 +1564,7 @@ void PlumeGraphicsSystem::NoteGuestFrameEnd() {
   }
   GuestDrawSnapshot marker;
   marker.is_frame_end = true;
+  marker.vr_pose_serial = vr::NoteFrameEnd();  // VR fork: the frame's head pose (plume_vr.cpp)
   PushMarker(std::move(marker));
 }
 
@@ -2125,6 +2126,8 @@ void PlumeGraphicsSystem::PresentClearColorOnUiThread(uint32_t guest_width,
           GuestDrawSnapshot& entry = draw_ring_[(start + i) % kDrawRingSize];
           if (!entry.is_frame_end) {
             overlays.push_back(std::move(entry));
+          } else {
+            vr::UseFramePose(entry.vr_pose_serial);  // VR fork: the drawn frame's own head pose (plume_vr.cpp)
           }
         }
         // What is left stays, moved to the front, for the next present.

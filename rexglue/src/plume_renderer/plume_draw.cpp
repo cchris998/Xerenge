@@ -7840,7 +7840,8 @@ void PlumeDrawContext::EncodeDraws(plume::RenderCommandList* list,
     // VR fork: the race's markers over the other cars are drawn in the scene at each car's depth (plume_vr.cpp).
     const bool vr_marker =
         !vr_hud_split &&
-        vr::MarkerDraw(snap.vs_hash, snap.ps_hash, reinterpret_cast<const float*>(snap.vs_constants.data()));
+        vr::MarkerDraw(snap.vs_hash, snap.ps_hash, snap.num_indices,
+                       reinterpret_cast<const float*>(snap.vs_constants.data()));
     if (vr::Stereo() && !vr_hud_split && !vr_marker && pass && pass->end && pass->begin && colour_target &&
         vr::HudVertexShader(snap.vs_hash)) {
       vr_hud_split = true;

@@ -280,6 +280,7 @@ struct GuestDrawSnapshot {
   bool is_end_tiling = false;
   // Where the title called Swap (see NoteGuestFrameEnd); never drawn.
   bool is_frame_end = false;
+  uint32_t vr_pose_serial = 0;  // VR fork: its frame's head pose (plume_vr.cpp NoteFrameEnd)
   // Where the video blit happened among the draws, with targets followed:
   // the decoded frame is put here at present rather than in front of the
   // frame, because the title copies it out of its target right after.

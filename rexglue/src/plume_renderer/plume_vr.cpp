@@ -15,9 +15,11 @@
 #include "plume_renderer/plume_postfx.h"
 #include "shader_cache.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -150,6 +152,60 @@ void NoteFramePresented() {
   }
 }
 
+// The camera's axes as the seat's (s: -1 1 -1, burnout_vr.cpp CameraAxes), then the view space's (sigma)
+// (XERENGE_VR_VIEW_SIGNS "s0 s1 s2 g0 g1 g2"; development: the VIEWSIGNS trigger file).
+// sigma: x opposite RenderWare's right (the paused race turned 25 degrees and pitched 20: only x flipped, and so
+// z's against it, keeps the streaks on the scene).
+float g_view_signs[6] = {-1.f, 1.f, -1.f, -1.f, 1.f, 1.f};
+const float* ViewSigns() {
+  static const bool read = [] {
+    if (const char* e = std::getenv("XERENGE_VR_VIEW_SIGNS")) {
+      std::sscanf(e, "%f %f %f %f %f %f", &g_view_signs[0], &g_view_signs[1], &g_view_signs[2], &g_view_signs[3],
+                  &g_view_signs[4], &g_view_signs[5]);
+    }
+    return true;
+  }();
+  (void)read;
+  return g_view_signs;
+}
+
+bool ViewSpaceDraw(const float* c) {
+  static const bool off = std::getenv("XERENGE_VR_TURN_VIEW") && std::getenv("XERENGE_VR_TURN_VIEW")[0] == '0';
+  if (off || !Stereo() || !g_frame.posed) {
+    return false;
+  }
+  // A perspective projection alone: rows (sx 0 ox 0) (0 sy oy 0) (0 0 a b) (0 0 1 0).
+  const auto zero = [](float v) { return std::fabs(v) < 1e-4f; };
+  return c[0] > 0.1f && c[5] > 0.1f && zero(c[1]) && zero(c[3]) && zero(c[4]) && zero(c[7]) && zero(c[8]) &&
+         zero(c[9]) && zero(c[12]) && zero(c[13]) && std::fabs(c[14] - 1.f) < 1e-4f && zero(c[15]);
+}
+
+void TurnViewSpaceDraw(float* c) {
+  // The renderer's camera rows are turned as row'_r = s_r sum_k pose[r][k] s_k row_k and its position moved by
+  // sum_k pose[3][k] s_k row_k (burnout_vr.cpp PoseRwMatrix). A point in the game's view space (axes sigma_i row_i)
+  // is in the turned one at v' = A v + t: A_ij = sigma_i sigma_j s_i s_j pose[i][j],
+  // t_i = -sigma_i s_i sum_k pose[3][k] pose[i][k]. The draw's projection C (clip_i = dot(c_i, v)) becomes C [A t].
+  const float* signs = ViewSigns();
+  const float* s = signs;
+  const float* sigma = signs + 3;
+  const float* pose = g_frame.pose;
+  float a[3][3], t[3];
+  for (int i = 0; i < 3; ++i) {
+    for (int j = 0; j < 3; ++j) {
+      a[i][j] = sigma[i] * sigma[j] * s[i] * s[j] * pose[i * 4 + j];
+    }
+    t[i] = -sigma[i] * s[i] * (pose[12] * pose[i * 4] + pose[13] * pose[i * 4 + 1] + pose[14] * pose[i * 4 + 2]);
+  }
+  for (int row = 0; row < 4; ++row) {
+    float* r = c + row * 4;
+    const float x = r[0], y = r[1], z = r[2];
+    for (int j = 0; j < 3; ++j) {
+      r[j] = x * a[0][j] + y * a[1][j] + z * a[2][j];
+    }
+    r[3] += x * t[0] + y * t[1] + z * t[2];
+  }
+}
+
 uint32_t HudBlendControl(uint32_t blend_control) {
   // RB_BLENDCONTROL: alpha_srcblend in bits 16-20 (xenos::BlendFactor: kSrcAlpha 6, kOne 1). The game blends its HUD for a
   // picture; over the cleared target the alpha it leaves is the layer's coverage. With SRC_ALPHA it was a squared: the
@@ -173,6 +229,89 @@ uint32_t HudColorMask(uint32_t color_mask, uint32_t blend_control) {
     return color_mask;
   }
   return color_mask | 0x8u;
+}
+
+namespace {
+std::string DevDir() {
+  const char* temp = std::getenv("TEMP");
+  return std::string(temp ? temp : ".") + "\\xerenge_vr\\";
+}
+std::mutex g_dev_mutex;
+std::vector<uint64_t> g_dev_skip;
+std::atomic<int> g_dev_log{0};  // 1 armed for the next frame, 2 logging this frame
+std::chrono::steady_clock::time_point g_dev_checked{};
+}  // namespace
+
+bool DevDraw(uint64_t vs_hash, uint64_t ps_hash, uint32_t blend_control, uint32_t color_mask, uint32_t prim_type,
+             uint32_t count, bool hud) {
+  static const bool enabled = std::getenv("XERENGE_VR_DEV") != nullptr;
+  if (!enabled) {
+    return false;
+  }
+  std::scoped_lock lock{g_dev_mutex};
+  if (g_dev_log.load() == 2) {
+    REXLOG_INFO("VR draw: vs {:016X} ps {:016X} blend {:08X} mask {:X} prim {} n {}{}", vs_hash, ps_hash, blend_control,
+                color_mask, prim_type, count, hud ? " hud" : "");
+  }
+  for (const uint64_t h : g_dev_skip) {
+    if (h == vs_hash || h == ps_hash) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void DevFrameEnd() {
+  static const bool enabled = std::getenv("XERENGE_VR_DEV") != nullptr;
+  if (!enabled) {
+    return;
+  }
+  std::scoped_lock lock{g_dev_mutex};
+  if (g_dev_log.load() == 2) {
+    g_dev_log = 0;
+    REXLOG_INFO("VR draw log: end of frame");
+  } else if (g_dev_log.load() == 1) {
+    g_dev_log = 2;
+  }
+  const auto now = std::chrono::steady_clock::now();
+  if (now - g_dev_checked < std::chrono::milliseconds(250)) {
+    return;
+  }
+  g_dev_checked = now;
+  const std::string dir = DevDir();
+  if (std::FILE* f = std::fopen((dir + "DRAWLOG").c_str(), "rb")) {
+    std::fclose(f);
+    std::remove((dir + "DRAWLOG").c_str());
+    g_dev_log = 1;
+  }
+  if (std::FILE* f = std::fopen((dir + "VIEWSIGNS").c_str(), "rb")) {
+    float v[6];
+    if (std::fscanf(f, "%f %f %f %f %f %f", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) == 6) {
+      ViewSigns();
+      std::memcpy(g_view_signs, v, sizeof(v));
+      REXLOG_INFO("VR view signs {} {} {} {} {} {}", v[0], v[1], v[2], v[3], v[4], v[5]);
+    }
+    std::fclose(f);
+    std::remove((dir + "VIEWSIGNS").c_str());
+  }
+  if (std::FILE* f = std::fopen((dir + "SKIP").c_str(), "rb")) {
+    char text[4096] = {};
+    const size_t n = std::fread(text, 1, sizeof(text) - 1, f);
+    std::fclose(f);
+    std::remove((dir + "SKIP").c_str());
+    g_dev_skip.clear();
+    for (char* p = text; p < text + n;) {
+      char* end = nullptr;
+      const uint64_t h = std::strtoull(p, &end, 16);
+      if (end == p) {
+        ++p;
+        continue;
+      }
+      g_dev_skip.push_back(h);
+      p = end;
+    }
+    REXLOG_INFO("VR skip: {} shaders", g_dev_skip.size());
+  }
 }
 
 bool HudVertexShader(uint64_t vs_hash) {
@@ -263,6 +402,7 @@ void Submit(plume::RenderDevice* device, plume::RenderCommandQueue* queue, plume
   if (g_split) {
     xr::HudCaptured();  // the HUD's picture, copied below, goes with the split frame
   }
+  DevFrameEnd();  // development triggers (DevDraw)
   xr::SetSceneSharpening(GetSharpening());  // flat plume's sharpening (its own pass reads one layer), per eye
   int screen = xr::BeginFrame(width, height);
   const bool split = screen <= -2;  // its scene is on screen -2 - screen (SplitAtInterface), the HUD to copy

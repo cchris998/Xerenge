@@ -7870,6 +7870,10 @@ void PlumeDrawContext::EncodeDraws(plume::RenderCommandList* list,
       note_skip("degenerate point list");
       return;
     }
+    if (vr::DevDraw(snap.vs_hash, snap.ps_hash, snap.blend_control, snap.color_mask, snap.prim_type, snap.num_indices,
+                    vr_hud_split)) {
+      return;  // VR fork, development: SKIP
+    }
     if (vb_used >= vb_base + kVertsPerFrame || encoded >= kSlotsPerFrame) {
       ++fate.full;
       // Dropping the rest of the frame is not something to do quietly - it
@@ -8196,13 +8200,20 @@ void PlumeDrawContext::EncodeDraws(plume::RenderCommandList* list,
     // thread already gives a draw the last one's block when the words are the
     // same (AssignShared): another block is all but always different, and
     // comparing its 4 KB to find that out cost more than writing it.
-    if (last_vs && last_vs == snap.vs_constants.data()) {
+    const bool turn_view =  // VR fork: drawn in the game's view space (plume_vr.cpp)
+        vr::ViewSpaceDraw(reinterpret_cast<const float*>(snap.vs_constants.data()));
+    if (!turn_view && last_vs && last_vs == snap.vs_constants.data()) {
       vs_slot = last_vs_slot;
     } else {
       std::memcpy(static_cast<uint8_t*>(vs_constants_mapped_) + vs_slot * kVsSlotBytes,
                   snap.vs_constants.data(), kVsConstantBytes);
       last_vs = snap.vs_constants.data();
       last_vs_slot = vs_slot;
+      if (turn_view) {  // VR fork: turned by the head; a block of its own, not shared
+        vr::TurnViewSpaceDraw(
+            reinterpret_cast<float*>(static_cast<uint8_t*>(vs_constants_mapped_) + vs_slot * kVsSlotBytes));
+        last_vs = nullptr;
+      }
     }
     if (last_ps && last_ps == snap.ps_constants.data()) {
       ps_slot = last_ps_slot;

@@ -40,6 +40,21 @@ bool HudVertexShader(uint64_t vs_hash);
 // alpha is the HUD's coverage (a + (1 - a) under), as the xenos path does. Else as given.
 uint32_t HudBlendControl(uint32_t blend_control);
 
+// A draw drawn in the game's view space: its first four vertex constants (gObjToProjMatrix) a perspective projection
+// alone. The particle system builds the sparks and the speed streaks there on the CPU from the game's own camera, not
+// the renderer's head-turned one, so they followed the head (Burnout 2026-10-31, the paused race turned 25 degrees: the
+// streaks kept their place in the view). TurnViewSpaceDraw puts the head's turn into that projection.
+bool ViewSpaceDraw(const float* vs_constants);
+void TurnViewSpaceDraw(float* vs_constants);
+
+// Development (VR): the trigger files %TEMP%\xerenge_vr\DRAWLOG (log the next frame's draws: shaders, blend, write
+// mask, primitive and count, and whether in the HUD) and SKIP (a list of shader hashes, hex: their draws are left out
+// while it lists them). True: leave this draw out.
+bool DevDraw(uint64_t vs_hash, uint64_t ps_hash, uint32_t blend_control, uint32_t color_mask, uint32_t prim_type,
+             uint32_t count, bool hud);
+// Development: a frame ends (the draw log's frame).
+void DevFrameEnd();
+
 // A HUD draw's colour write mask: one that blends over (colour dest ONE_MINUS_SRC_ALPHA) but leaves alpha out writes
 // alpha too, so it covers what is under it in the layer (else it is added on top: bars washed out, dark backings gone).
 uint32_t HudColorMask(uint32_t color_mask, uint32_t blend_control);

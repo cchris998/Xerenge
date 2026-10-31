@@ -155,7 +155,7 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
       const std::string size = xerenge::settings::ConfString("vr_resolution", "2x3");
       const size_t cross = size.find('x');
       const int x = cross != std::string::npos ? std::clamp(std::atoi(size.c_str()), 1, 6) : 2;
-      const int y = cross != std::string::npos ? std::clamp(std::atoi(size.c_str() + cross + 1), 1, 6) : 3;
+      const int y = cross != std::string::npos ? std::clamp(std::atoi(size.c_str() + cross + 1), 1, 8) : 3;
       _putenv_s("XERENGE_RENDER_RESOLUTION", fmt::format("{}x{}", 1280 * x, 720 * y).c_str());
     }
     // Frames at the headset's rate: no desktop vsync, no 60 Hz vblank pacing (the logic on the wall clock).

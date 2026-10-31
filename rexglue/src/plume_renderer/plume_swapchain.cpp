@@ -99,8 +99,8 @@ void RequestedRenderResolution(uint32_t* width, uint32_t* height) {
   *height = 0;
   const char* text = std::getenv("XERENGE_RENDER_RESOLUTION");
   unsigned w = 0, h = 0;
-  if (text && std::sscanf(text, "%ux%u", &w, &h) == 2 && w >= 320 && h >= 180 && w <= 7680 &&
-      h <= 4320) {
+  if (text && std::sscanf(text, "%ux%u", &w, &h) == 2 && w >= 320 && h >= 180 && w <= 8192 &&
+      h <= 8192) {  // VR fork: was 7680x4320; the headset's eyes go to 7680x5760 (VR EYE SIZE)
     *width = w;
     *height = h;
   }

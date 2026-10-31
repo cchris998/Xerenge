@@ -313,8 +313,90 @@ struct Interpolation {
 } g_interpolation;
 }  // namespace
 
+namespace {
+// The game camera's depth: depth-buffer value z = a + b / view depth (its projection: VP's z row = a w row + b e3),
+// from the static world's draws (MCLA_VR_CAMERA_VS).
+std::atomic<float> g_depth_a{0.f}, g_depth_b{0.f};
+void NoteCameraDepth(const float* c) {
+  int k = 0;
+  for (int i = 1; i < 3; ++i) {
+    k = std::fabs(c[12 + i]) > std::fabs(c[12 + k]) ? i : k;
+  }
+  if (std::fabs(c[12 + k]) < 1e-4f) {
+    return;
+  }
+  const float a = c[8 + k] / c[12 + k];
+  g_depth_a.store(a, std::memory_order_relaxed);
+  g_depth_b.store(c[11] - a * c[15], std::memory_order_relaxed);
+}
+}  // namespace
+
+bool g_marker_run = true;  // the frame's 2D draws so far are all markers (BeginFrame)
+
+bool MarkerDraw(uint64_t vs_hash, uint64_t ps_hash, const float* c) {
+  static const bool off = std::getenv("XERENGE_VR_MARKERS") && std::getenv("XERENGE_VR_MARKERS")[0] == '0';
+  if (off || !Stereo() || !g_marker_run || !HudVertexShader(vs_hash)) {
+    return false;
+  }
+  // The frame's first 2D draws, flat colour (the triangles, the position label's shapes), each with its car's depth
+  // value in gPosOffset.z (past 0.85, 3.3 m). The run ends at the first other 2D draw: the race HUD (z ~0) or the pause
+  // menu (textured) - the game leaves z as the last marker set it, and the pause menu's panels carried it.
+  constexpr uint64_t kFlatColourPs = 0x6EB945B547506423ull;
+  const bool marker = ps_hash == kFlatColourPs && std::fabs(c[3] - 1.f) < 1e-5f && c[2] > 0.85f && c[2] < 1.f &&
+                      c[4] > 0.f && c[5] < 0.f && g_depth_b.load(std::memory_order_relaxed) != 0.f;
+  g_marker_run = marker;
+  return marker;
+}
+
+void PlaceMarker(float* c, const float* centre) {
+  const float a = g_depth_a.load(std::memory_order_relaxed), b = g_depth_b.load(std::memory_order_relaxed);
+  if (std::fabs(c[2] - a) < 1e-6f) {
+    return;
+  }
+  float depth = b / (c[2] - a);
+  if (!(depth > 0.1f && depth < 100000.f)) {
+    return;
+  }
+  // The game projects the markers with its own camera, not the head-turned one: its centre (as drawn) taken back to
+  // the game's view space at that depth (the frame's symmetric field of view, as burnout_vr.cpp sets the camera's
+  // view window), turned as the view-space draws are (TurnViewSpaceDraw), projected again; the marker moved by the
+  // difference, its depth the turned one.
+  const FramePose& frame = g_frame;
+  if (centre && frame.posed && frame.tangents[1] > 0.f && frame.tangents[2] > 0.f) {
+    const float sx = 1.f / frame.tangents[1], sy = 1.f / frame.tangents[2];
+    const float nx = centre[0] * c[4] + c[0], ny = centre[1] * c[5] + c[1];
+    float p[16] = {sx, 0.f, 0.f, 0.f, 0.f, sy, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 1.f, 0.f};
+    TurnViewSpaceDraw(p);
+    const float v[4] = {nx * depth / sx, ny * depth / sy, depth, 1.f};
+    float clip[4];
+    for (int r = 0; r < 4; ++r) {
+      clip[r] = p[r * 4] * v[0] + p[r * 4 + 1] * v[1] + p[r * 4 + 2] * v[2] + p[r * 4 + 3] * v[3];
+    }
+    if (clip[3] > 0.1f) {
+      c[0] += clip[0] / clip[3] - nx;
+      c[1] += clip[1] / clip[3] - ny;
+      depth = clip[3];
+    }
+  } else if (static int unknown = 0; unknown < 4) {
+    ++unknown;
+    REXLOG_INFO("VR marker: no centre ({}), not turned with the head", centre ? "unposed" : "not unpacked here");
+  }
+  for (int i = 0; i < 4; ++i) {
+    c[i] *= depth;
+  }
+  c[4] *= depth;
+  c[5] *= depth;
+  if (static int logged = 0; logged < 8 || std::getenv("XERENGE_VR_MARKERLOG")) {  // development
+    ++logged;
+    REXLOG_INFO("VR marker: depth value {:.5f} -> {:.1f} m (a {:.5f} b {:.5f})", c[2] / depth, depth, a, b);
+  }
+}
+
 bool InterpolateDraw(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uint32_t target_width, const float* c,
                      float* wvp_out) {
+  if (Stereo() && CameraVertexShader(vs_hash)) {
+    NoteCameraDepth(c);
+  }
   const FramePose& frame = g_frame;
   if (!Stereo() || !frame.posed || !frame.interpolated || !depth_tested) {
     return false;
@@ -496,6 +578,8 @@ bool DevDraw(uint64_t vs_hash, uint64_t ps_hash, uint32_t blend_control, uint32_
   return false;
 }
 
+bool DevLogging() { return g_dev_log.load() == 2; }
+
 void DevFrameEnd() {
   static const bool enabled = std::getenv("XERENGE_VR_DEV") != nullptr;
   if (!enabled) {
@@ -578,6 +662,7 @@ void BeginFrame() {
   }
   g_frame = {};
   g_split = false;
+  g_marker_run = true;
   {
     std::scoped_lock lock{g_pose_mutex};
     if (!g_poses.empty()) {

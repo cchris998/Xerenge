@@ -7837,7 +7837,11 @@ void PlumeDrawContext::EncodeDraws(plume::RenderCommandList* list,
     // goes to the headset's screen and the target is cleared for the HUD (plume_vr.cpp). The shader, not the
     // interface hooks: the race HUD is drawn from the title's job loop, on whichever thread takes the job, and the
     // hooks' thread-local mark saw it only when the main thread ran the job itself (72 Hz yes, 120 Hz and up no).
-    if (vr::Stereo() && !vr_hud_split && pass && pass->end && pass->begin && colour_target &&
+    // VR fork: the race's markers over the other cars are drawn in the scene at each car's depth (plume_vr.cpp).
+    const bool vr_marker =
+        !vr_hud_split &&
+        vr::MarkerDraw(snap.vs_hash, snap.ps_hash, reinterpret_cast<const float*>(snap.vs_constants.data()));
+    if (vr::Stereo() && !vr_hud_split && !vr_marker && pass && pass->end && pass->begin && colour_target &&
         vr::HudVertexShader(snap.vs_hash)) {
       vr_hud_split = true;
       pass->end(pass->context);
@@ -7873,6 +7877,30 @@ void PlumeDrawContext::EncodeDraws(plume::RenderCommandList* list,
     if (vr::DevDraw(snap.vs_hash, snap.ps_hash, snap.blend_control, snap.color_mask, snap.prim_type, snap.num_indices,
                     vr_hud_split)) {
       return;  // VR fork, development: SKIP
+    }
+    if ((vr_hud_split || vr::HudVertexShader(snap.vs_hash)) && memory && vr::DevLogging()) {  // VR fork, development
+      const uint32_t addr = snap.d3d_stream_address[0], stride = snap.d3d_stream_stride[0];
+      std::string text;
+      const uint32_t phys = (addr & 0x1FFFFFFFu) + (((addr >> 20) + 0x200u) & 0x1000u);
+      const auto* host = addr && stride ? memory->TranslatePhysical<const uint8_t*>(phys + snap.d3d_base_vertex * stride)
+                                        : nullptr;
+      for (uint32_t v = 0; host && v < std::min<uint32_t>(snap.num_indices, 4); ++v) {
+        text += " |";
+        for (uint32_t w = 0; w < std::min<uint32_t>(stride / 4, 8); ++w) {
+          uint32_t bits;
+          std::memcpy(&bits, host + v * stride + w * 4, 4);
+          bits = __builtin_bswap32(bits);
+          float f;
+          std::memcpy(&f, &bits, 4);
+          text += fmt::format(" {:.4g}", f);
+        }
+      }
+      const float* c = reinterpret_cast<const float*>(snap.vs_constants.data());
+      REXLOG_INFO("VR hud draw: vs {:016X} ps {:016X} marker {} split {} n {} iface {} stride {} c0-3 {:.4g} {:.4g} {:.4g} {:.4g} / {:.4g} {:.4g} {:.4g} {:.4g} "
+                  "/ {:.4g} {:.4g} {:.4g} {:.4g} / {:.4g} {:.4g} {:.4g} {:.4g} verts{}",
+                  snap.vs_hash, snap.ps_hash, vr_marker ? 1 : 0, vr_hud_split ? 1 : 0,
+                  snap.num_indices, snap.interface_draw ? 1 : 0, stride, c[0], c[1], c[2], c[3], c[4],
+                  c[5], c[6], c[7], c[8], c[9], c[10], c[11], c[12], c[13], c[14], c[15], text);
     }
     if (vb_used >= vb_base + kVertsPerFrame || encoded >= kSlotsPerFrame) {
       ++fate.full;
@@ -8210,7 +8238,7 @@ void PlumeDrawContext::EncodeDraws(plume::RenderCommandList* list,
              (uint64_t(snap.d3d_start_index) << 32 | snap.num_indices)),
         DepthStateFromGuest(snap.depth_control).enabled, snap.d3d_target_width,
         reinterpret_cast<const float*>(snap.vs_constants.data()), between_steps);
-    if (!turn_view && !interpolate && last_vs && last_vs == snap.vs_constants.data()) {
+    if (!turn_view && !interpolate && !vr_marker && last_vs && last_vs == snap.vs_constants.data()) {
       vs_slot = last_vs_slot;
     } else {
       std::memcpy(static_cast<uint8_t*>(vs_constants_mapped_) + vs_slot * kVsSlotBytes,
@@ -8220,6 +8248,32 @@ void PlumeDrawContext::EncodeDraws(plume::RenderCommandList* list,
       if (turn_view) {  // VR fork: turned by the head; a block of its own, not shared
         vr::TurnViewSpaceDraw(
             reinterpret_cast<float*>(static_cast<uint8_t*>(vs_constants_mapped_) + vs_slot * kVsSlotBytes));
+        last_vs = nullptr;
+      }
+      if (vr_marker) {  // VR fork: at its car's depth; a block of its own
+        // Its vertices' centre (guest pixels): unpacked here, as a cached mesh's are not.
+        float centre[2];
+        bool centre_known = false;
+        if (const auto* vs_info = FindResolvedVfetch(snap.vs_hash); vs_info && memory && snap.num_indices <= 256) {
+          const bool own = !passthrough;
+          std::vector<float> staged(size_t(snap.num_indices) * kFloatsPerVert);
+          std::vector<uint32_t> lo, hi;
+          uint32_t fetched = 0, fetch_addr = 0, fetch_type = 0;
+          const uint32_t pos_float = own ? vs_info->real_pos_float : vs_info->passthrough_pos_float;
+          UnpackVertices(snap, own ? vs_info->real_attrs : vs_info->passthrough_attrs,
+                         own ? vs_info->real_pos_fetch_const : vs_info->passthrough_pos_fetch_const, pos_float,
+                         snap.num_indices, memory, staged.data(), lo, hi, fetched, fetch_addr, fetch_type);
+          float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f;
+          for (uint32_t v = 0; v < snap.num_indices; ++v) {
+            const float* p = staged.data() + size_t(v) * kFloatsPerVert + pos_float;
+            x0 = std::min(x0, p[0]), x1 = std::max(x1, p[0]), y0 = std::min(y0, p[1]), y1 = std::max(y1, p[1]);
+          }
+          centre[0] = 0.5f * (x0 + x1);
+          centre[1] = 0.5f * (y0 + y1);
+          centre_known = x1 >= x0 && std::fabs(centre[0]) < 1e5f && std::fabs(centre[1]) < 1e5f;
+        }
+        vr::PlaceMarker(reinterpret_cast<float*>(static_cast<uint8_t*>(vs_constants_mapped_) + vs_slot * kVsSlotBytes),
+                        centre_known ? centre : nullptr);
         last_vs = nullptr;
       }
       if (interpolate) {  // VR fork: c0-c3 between logic steps; a block of its own
@@ -8369,7 +8423,8 @@ void PlumeDrawContext::EncodeDraws(plume::RenderCommandList* list,
       // drawn by the other one it jumped between the box and the whole width.
       const bool boxed = (box_w != width || box_h != height) && vw == width && vh == height &&
                          (snap.interface_draw || snap.d3d_vertex_buffer == 0 ||
-                          snap.has_video_frame() || vr::InterfaceSplit());  // VR fork: after the HUD split
+                          snap.has_video_frame() || vr::InterfaceSplit()) &&  // VR fork: after the HUD split
+                         !vr_marker;
       // The music player's panel keeps its box against the screen's left edge;
       // the HUD's objects go to the edge of their side, each one whole.
       uint32_t vx = 0;

@@ -36,10 +36,21 @@ void NoteFramePresented();
 /// microcode hashes the SDK's xenos path splits at; burnout_vr.cpp sets the title's).
 bool HudVertexShader(uint64_t vs_hash);
 
+// Development: the DRAWLOG trigger's frame is being logged.
+bool DevLogging();
+
 // Whether this frame's HUD split has happened (SplitAtInterface): everything drawn after it is 2D, kept in the 16:9 box
 // like the marked interface - the pause menu, not always marked, was stretched over a 3840x4320 eye (Matt 2026-10-31:
 // "The pause menu is too tall").
 bool InterfaceSplit();
+
+// The race's markers over the other cars (blue triangles and their outlines: the 2D shader, gPosOffset c0 with the car's
+// depth-buffer value in z where the interface has ~0) were on the HUD sheet, at its distance whatever the car's (Matt
+// 2026-10-31: "they should be the depth of each car they relate to"). They stay in the scene: PlaceMarker scales c0 and
+// c1.xy by the car's view depth (from the game camera's projection), the same place on screen with w = that depth, so
+// the eyes' clip shift puts them at it.
+bool MarkerDraw(uint64_t vs_hash, uint64_t ps_hash, const float* vs_constants);
+void PlaceMarker(float* vs_constants, const float* centre_pixels);
 
 // A HUD draw's blend control (after the split, over transparent black): alpha SRC_ALPHA becomes ONE, so the layer's
 // alpha is the HUD's coverage (a + (1 - a) under), as the xenos path does. Else as given.

@@ -8202,7 +8202,15 @@ void PlumeDrawContext::EncodeDraws(plume::RenderCommandList* list,
     // comparing its 4 KB to find that out cost more than writing it.
     const bool turn_view =  // VR fork: drawn in the game's view space (plume_vr.cpp)
         vr::ViewSpaceDraw(reinterpret_cast<const float*>(snap.vs_constants.data()));
-    if (!turn_view && last_vs && last_vs == snap.vs_constants.data()) {
+    float between_steps[16];  // VR fork: moved to the frame's moment between logic steps (plume_vr.cpp)
+    const bool interpolate = vr::InterpolateDraw(
+        snap.vs_hash,
+        (snap.vs_hash * 0x9E3779B97F4A7C15ull ^ snap.ps_hash) * 31 +
+            ((uint64_t(snap.d3d_vertex_buffer) << 32 | snap.d3d_index_buffer) * 131 +
+             (uint64_t(snap.d3d_start_index) << 32 | snap.num_indices)),
+        DepthStateFromGuest(snap.depth_control).enabled, snap.d3d_target_width,
+        reinterpret_cast<const float*>(snap.vs_constants.data()), between_steps);
+    if (!turn_view && !interpolate && last_vs && last_vs == snap.vs_constants.data()) {
       vs_slot = last_vs_slot;
     } else {
       std::memcpy(static_cast<uint8_t*>(vs_constants_mapped_) + vs_slot * kVsSlotBytes,
@@ -8212,6 +8220,11 @@ void PlumeDrawContext::EncodeDraws(plume::RenderCommandList* list,
       if (turn_view) {  // VR fork: turned by the head; a block of its own, not shared
         vr::TurnViewSpaceDraw(
             reinterpret_cast<float*>(static_cast<uint8_t*>(vs_constants_mapped_) + vs_slot * kVsSlotBytes));
+        last_vs = nullptr;
+      }
+      if (interpolate) {  // VR fork: c0-c3 between logic steps; a block of its own
+        std::memcpy(static_cast<uint8_t*>(vs_constants_mapped_) + vs_slot * kVsSlotBytes, between_steps,
+                    sizeof(between_steps));
         last_vs = nullptr;
       }
     }

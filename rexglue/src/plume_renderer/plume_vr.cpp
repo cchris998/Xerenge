@@ -25,6 +25,7 @@
 #include <deque>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -41,6 +42,10 @@ namespace {
 struct FramePose {
   bool posed = false;
   float pose[16]{}, tangents[4]{};
+  bool interpolated = false;  // the frame's logic state and moment between it and the one before (InterpolateDraw)
+  double state = 0.0;
+  float t = 1.f;
+  uint64_t serial = 0;
 };
 std::mutex g_pose_mutex;
 std::deque<FramePose> g_poses;  // presented frames' poses, in order, for the submissions
@@ -145,6 +150,12 @@ void NoteFramePresented() {
   FramePose frame;
   frame.posed = xr::TakeCameraPose(*reinterpret_cast<float(*)[16]>(frame.pose),
                                    *reinterpret_cast<float(*)[4]>(frame.tangents));
+  // Named while the frame was built (burnout_vr.cpp InterpolateCamera, keyed by the swaps before its own).
+  const uint64_t swaps = xr::GameSwapCount();
+  frame.interpolated = xr::FrameInterpolation(swaps, frame.state, frame.t) ||
+                       (swaps && xr::FrameInterpolation(swaps - 1, frame.state, frame.t));
+  static uint64_t serial = 0;
+  frame.serial = ++serial;
   std::scoped_lock lock{g_pose_mutex};
   g_poses.push_back(frame);
   while (g_poses.size() > 4) {
@@ -204,6 +215,230 @@ void TurnViewSpaceDraw(float* c) {
     }
     r[3] += x * t[0] + y * t[1] + z * t[2];
   }
+}
+
+namespace {
+bool CameraVertexShader(uint64_t vs_hash) {
+  static const std::unordered_set<uint64_t> hashes = [] {
+    std::unordered_set<uint64_t> set;
+    const char* list = std::getenv("MCLA_VR_CAMERA_VS");
+    for (const char* p = list ? list : ""; *p;) {
+      char* end = nullptr;
+      const uint64_t microcode = std::strtoull(p, &end, 16);
+      if (end == p) {
+        break;
+      }
+      set.insert(microcode);
+      if (const ShaderMicrocodeEntry* entry = PlumeShaderCache::Instance().FindByMicrocode(microcode)) {
+        set.insert(entry->shaderHash);
+      }
+      p = *end ? end + 1 : end;
+    }
+    return set;
+  }();
+  return vs_hash != 0 && hashes.count(vs_hash) != 0;
+}
+
+// m = a b (row-major 4x4).
+void Multiply4(const float* a, const float* b, float* m) {
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 4; ++c) {
+      m[r * 4 + c] = a[r * 4] * b[c] + a[r * 4 + 1] * b[4 + c] + a[r * 4 + 2] * b[8 + c] + a[r * 4 + 3] * b[12 + c];
+    }
+  }
+}
+
+// The inverse by cofactors (in double: a projection's rows differ by orders of magnitude).
+bool Invert4(const float* f, float* out) {
+  double m[16], inv[16];
+  for (int i = 0; i < 16; ++i) {
+    m[i] = f[i];
+  }
+  inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] +
+           m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+  inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] -
+           m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+  inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] +
+           m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+  inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] -
+            m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+  inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] -
+           m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+  inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] +
+           m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+  inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] -
+           m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+  inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] +
+            m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+  inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] +
+           m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+  inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] -
+           m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+  inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] +
+            m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+  inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] -
+            m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+  inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] -
+           m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+  inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] +
+           m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+  inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] -
+            m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+  inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] +
+            m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+  const double det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+  if (std::fabs(det) < 1e-30) {
+    return false;
+  }
+  for (int i = 0; i < 16; ++i) {
+    out[i] = float(inv[i] / det);
+  }
+  return true;
+}
+
+struct Interpolation {
+  std::mutex mutex;
+  uint64_t serial = 0;  // the frame (FramePose::serial)
+  double state = -1.0;
+  bool recording = false;
+  std::unordered_map<uint64_t, std::vector<std::array<float, 16>>> prev, curr;
+  std::unordered_map<uint64_t, uint32_t> counters;
+  bool have_vp = false;
+  float vp[16]{}, vp_inverse[16]{};
+  uint32_t vp_width = 0;
+  uint32_t draws = 0, interpolated = 0, paired = 0, found = 0, states = 0;  // development
+  float max_move = 0.f;
+  float track_w = 0.f, track[4]{};  // development: the nearest moving draw's origin on screen (XERENGE_VR_INTERPTRACK)
+  float sample[16]{};
+} g_interpolation;
+}  // namespace
+
+bool InterpolateDraw(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uint32_t target_width, const float* c,
+                     float* wvp_out) {
+  const FramePose& frame = g_frame;
+  if (!Stereo() || !frame.posed || !frame.interpolated || !depth_tested) {
+    return false;
+  }
+  // c0-c3: clip_i = dot(c_i, position), the rows of WVP (column vectors: WVP = VP W). A perspective draw's w row has
+  // x, y or z; an orthographic one (the interface, full-screen passes) is (0 0 0 1).
+  if (std::fabs(c[12]) + std::fabs(c[13]) + std::fabs(c[14]) < 1e-6f) {
+    return false;
+  }
+  Interpolation& vi = g_interpolation;
+  std::scoped_lock lock{vi.mutex};
+  if (frame.serial != vi.serial) {  // the frame's first scene draw
+    if (static const bool track = std::getenv("XERENGE_VR_INTERPTRACK") != nullptr; track && vi.track_w > 0.f) {
+      REXLOG_INFO("VR interpolation track: t {:.3f} screen {:.4f} {:.4f} (as drawn by the state {:.4f} {:.4f}) depth {:.2f}",
+                  frame.t, vi.track[0], vi.track[1], vi.track[2], vi.track[3], vi.track_w);
+    }
+    vi.track_w = 0.f;
+    vi.serial = frame.serial;
+    vi.counters.clear();
+    vi.have_vp = false;
+    vi.recording = frame.state != vi.state;
+    if (vi.recording) {
+      ++vi.states;
+      if (frame.state > vi.state && frame.state - vi.state <= 4.0) {
+        vi.prev = std::move(vi.curr);
+      } else {
+        vi.prev.clear();  // the timer started over, or a long gap
+      }
+      vi.curr.clear();
+      vi.state = frame.state;
+    }
+    if (static uint32_t frames = 0; ++frames % 600 == 0 && std::getenv("XERENGE_VR_INTERPLOG")) {  // development
+      REXLOG_INFO("VR interpolation (plume): {} of {} scene draws moved between steps (paired {}, found {}, {} new "
+                  "states), t {:.3f} state {}",
+                  vi.interpolated, vi.draws, vi.paired, vi.found, vi.states, frame.t, frame.state);
+      REXLOG_INFO("  max move {:.4f}, its world {:.3f} {:.3f} {:.3f} {:.3f} / {:.3f} {:.3f} {:.3f} {:.3f} / {:.3f} {:.3f} "
+                  "{:.3f} {:.3f} / {:.3f} {:.3f} {:.3f} {:.3f}; vp {:.3f} {:.3f} {:.3f} {:.3f} / {:.3f} {:.3f} {:.3f} {:.3f}",
+                  vi.max_move, vi.sample[0], vi.sample[1], vi.sample[2], vi.sample[3], vi.sample[4], vi.sample[5],
+                  vi.sample[6], vi.sample[7], vi.sample[8], vi.sample[9], vi.sample[10], vi.sample[11], vi.sample[12],
+                  vi.sample[13], vi.sample[14], vi.sample[15], vi.vp[0], vi.vp[1], vi.vp[2], vi.vp[3], vi.vp[12],
+                  vi.vp[13], vi.vp[14], vi.vp[15]);
+      vi.max_move = 0.f;
+      vi.draws = vi.interpolated = vi.paired = vi.found = vi.states = 0;
+    }
+  }
+  if (CameraVertexShader(vs_hash)) {
+    if (!vi.have_vp) {
+      std::memcpy(vi.vp, c, sizeof(vi.vp));
+      vi.have_vp = Invert4(vi.vp, vi.vp_inverse);
+      vi.vp_width = target_width;
+    }
+    return false;
+  }
+  if (!vi.have_vp || target_width != vi.vp_width) {
+    return false;  // before the camera's first draw, or another target (shadows, reflections)
+  }
+  float world[16];
+  Multiply4(vi.vp_inverse, c, world);
+  const uint32_t index = vi.counters[mesh_key]++;
+  if (vi.recording) {
+    auto& list = vi.curr[mesh_key];
+    list.emplace_back();
+    std::memcpy(list.back().data(), world, sizeof(world));
+  }
+  ++vi.draws;
+  const auto before = vi.prev.find(mesh_key);
+  if (frame.t >= 0.999f || before == vi.prev.end()) {
+    return false;
+  }
+  ++vi.paired;
+  // The same draw the state before: the same place among the mesh's draws when it has not moved (a centimetre), else the
+  // nearest within a step's travel (metres). Not the same place within the travel: identical props (posts, cones) swap
+  // places in the draw order as the view culls them, and one was drawn sliding into its neighbour.
+  const auto distance2 = [&](const std::array<float, 16>& m) {
+    const float x = m[3] - world[3], y = m[7] - world[7], z = m[11] - world[11];
+    return x * x + y * y + z * z;
+  };
+  constexpr float kStep2 = 4.f * 4.f;
+  const std::array<float, 16>* from = nullptr;
+  if (index < before->second.size() && distance2(before->second[index]) < 0.01f * 0.01f) {
+    from = &before->second[index];
+  } else {
+    float nearest = kStep2;
+    for (const auto& m : before->second) {
+      if (const float d = distance2(m); d < nearest) {
+        nearest = d;
+        from = &m;
+      }
+    }
+  }
+  // Moved: by more than the rounding of a world taken back out of WVP (a millimetre, 1e-4 of the axes).
+  bool moved = false;
+  for (int i = 0; from && i < 16 && !moved; ++i) {
+    moved = std::fabs((*from)[i] - world[i]) > (i == 3 || i == 7 || i == 11 ? 1e-3f : 1e-4f);
+  }
+  vi.found += from ? 1 : 0;
+  if (from) {
+    const float d = std::fabs((*from)[3] - world[3]) + std::fabs((*from)[7] - world[7]) + std::fabs((*from)[11] - world[11]);
+    if (d >= vi.max_move) {
+      vi.max_move = d;
+      std::memcpy(vi.sample, world, sizeof(world));
+    }
+  }
+  if (!moved) {
+    return false;
+  }
+  float between[16];
+  for (int i = 0; i < 16; ++i) {
+    between[i] = (*from)[i] + (world[i] - (*from)[i]) * frame.t;
+  }
+  Multiply4(vi.vp, between, wvp_out);
+  ++vi.interpolated;
+  // The player car: nearest the bottom middle of the view, 3-12 m ahead.
+  const auto off_centre = [](float x, float y) { return x * x + (y + 0.4f) * (y + 0.4f); };
+  if (wvp_out[15] > 3.f && wvp_out[15] < 12.f &&
+      (vi.track_w == 0.f || off_centre(wvp_out[3] / wvp_out[15], wvp_out[7] / wvp_out[15]) <
+                                off_centre(vi.track[0], vi.track[1]))) {
+    vi.track_w = wvp_out[15];
+    vi.track[0] = wvp_out[3] / wvp_out[15];
+    vi.track[1] = wvp_out[7] / wvp_out[15];
+    vi.track[2] = c[3] / c[15];
+    vi.track[3] = c[7] / c[15];
+  }
+  return true;
 }
 
 uint32_t HudBlendControl(uint32_t blend_control) {

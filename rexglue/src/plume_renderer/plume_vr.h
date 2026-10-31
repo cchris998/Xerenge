@@ -47,6 +47,14 @@ uint32_t HudBlendControl(uint32_t blend_control);
 bool ViewSpaceDraw(const float* vs_constants);
 void TurnViewSpaceDraw(float* vs_constants);
 
+// Drawing between logic steps (logic at 60 steps a second under the headset's faster frames; burnout_vr.cpp turns the
+// camera to the frame's moment and names the frame's state and t, vr::SetFrameInterpolation): each moving draw of the
+// scene goes from where it was at the state before to where it is, as the SDK's xenos path does
+// (command_processor.cpp). Its world is its WVP (c0-c3) over the frame's camera, the WVP of MCLA_VR_CAMERA_VS's draws.
+// True with the draw's c0-c3 to use in `wvp_out`. Every depth-tested draw of the camera's target is recorded.
+bool InterpolateDraw(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uint32_t target_width,
+                     const float* vs_constants, float* wvp_out);
+
 // Development (VR): the trigger files %TEMP%\xerenge_vr\DRAWLOG (log the next frame's draws: shaders, blend, write
 // mask, primitive and count, and whether in the HUD) and SKIP (a list of shader hashes, hex: their draws are left out
 // while it lists them). True: leave this draw out.

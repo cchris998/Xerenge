@@ -27,6 +27,7 @@
 #include <fmt/format.h>
 #include <rex/cvar.h>
 #include <rex/hook.h>
+#include <rex/input/input_system.h>
 #include <rex/logging.h>
 #include <rex/ppc.h>
 #include <rex/system/gpu_plugin.h>
@@ -101,6 +102,13 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
     return;
   }
   rex::cvar::SetFlagByName("vr", "true");
+  // Start recentres the view on the head (Matt 2026-10-31: "We need to recentre the headset when pressing start"): the
+  // pause menu and the menus' Start, as F8 does. 0x0010 is X_INPUT_GAMEPAD_START.
+  rex::input::SetButtonPressedHook([](uint16_t button) {
+    if (button == 0x0010) {
+      vr::Recenter();
+    }
+  });
   // The renderer (VR RENDERER, vr_renderer in xerenge.conf; XERENGE_VR_RENDERER wins): xenos (the SDK's VR layer on
   // the xenos plugin's Vulkan backend, the default) or plume (its own renderer, no EDRAM emulation: plume_vr.cpp runs
   // the same OpenXR layer on plume's device). The camera hooks below serve both.
@@ -151,10 +159,12 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
     if (!std::getenv("MCLA_VR_PACE_TOKEN")) {
       _putenv_s("MCLA_VR_PACE_TOKEN", "0");
     }
-    // Drawing between logic steps moves the moving draws on the xenos GPU thread only: the camera alone moving would
-    // shake the car against it.
-    if (!std::getenv("XERENGE_VR_INTERPOLATE")) {
-      _putenv_s("XERENGE_VR_INTERPOLATE", "0");
+    // Drawing between logic steps: the camera turned to the frame's moment here, the moving draws moved with it by
+    // plume_vr.cpp InterpolateDraw (Matt 2026-10-30: the car selection's turning camera "very jerky" against the head:
+    // 60 steps a second under 90 Hz frames). XERENGE_VR_INTERPOLATE=0: off.
+    // The static world's vertex shaders (one WVP, the camera's VP): the other draws' worlds are taken from it.
+    if (!std::getenv("MCLA_VR_CAMERA_VS")) {
+      _putenv_s("MCLA_VR_CAMERA_VS", "C3FF17490757589F,1A563CA9A421178A,ACB68BA117ABC107");
     }
     REXLOG_INFO("VR: the plume renderer");
     return;

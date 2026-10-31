@@ -590,6 +590,8 @@ void BeginFrame() {
   xr::SetFrameHasScene(g_frame.posed);
 }
 
+bool InterfaceSplit() { return g_active && g_split; }
+
 void SplitAtInterface(plume::RenderCommandList* list, plume::RenderTexture* target, uint32_t width, uint32_t height) {
   static const bool off = std::getenv("XERENGE_VR_HUD_LAYER") && std::getenv("XERENGE_VR_HUD_LAYER")[0] == '0';
   ++g_split_calls;
@@ -639,6 +641,9 @@ void Submit(plume::RenderDevice* device, plume::RenderCommandQueue* queue, plume
   }
   DevFrameEnd();  // development triggers (DevDraw)
   xr::SetSceneSharpening(GetSharpening());  // flat plume's sharpening (its own pass reads one layer), per eye
+  // The flat screen's shape (title, menus) is the frame's: at the 16:9 default a 3840x4320 eye's frame was squashed to
+  // half its height (Matt 2026-10-31: "The intro is too wide"). Its picture keeps a 16:9 strip (plume_draw.cpp's box).
+  xr::SetScreenAspect(float(height) / float(width));
   int screen = xr::BeginFrame(width, height);
   const bool split = screen <= -2;  // its scene is on screen -2 - screen (SplitAtInterface), the HUD to copy
   if (split) {

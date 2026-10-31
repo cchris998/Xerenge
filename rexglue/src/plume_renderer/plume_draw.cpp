@@ -8369,7 +8369,7 @@ void PlumeDrawContext::EncodeDraws(plume::RenderCommandList* list,
       // drawn by the other one it jumped between the box and the whole width.
       const bool boxed = (box_w != width || box_h != height) && vw == width && vh == height &&
                          (snap.interface_draw || snap.d3d_vertex_buffer == 0 ||
-                          snap.has_video_frame());
+                          snap.has_video_frame() || vr::InterfaceSplit());  // VR fork: after the HUD split
       // The music player's panel keeps its box against the screen's left edge;
       // the HUD's objects go to the edge of their side, each one whole.
       uint32_t vx = 0;

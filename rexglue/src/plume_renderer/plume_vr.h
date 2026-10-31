@@ -36,6 +36,11 @@ void NoteFramePresented();
 /// microcode hashes the SDK's xenos path splits at; burnout_vr.cpp sets the title's).
 bool HudVertexShader(uint64_t vs_hash);
 
+// Whether this frame's HUD split has happened (SplitAtInterface): everything drawn after it is 2D, kept in the 16:9 box
+// like the marked interface - the pause menu, not always marked, was stretched over a 3840x4320 eye (Matt 2026-10-31:
+// "The pause menu is too tall").
+bool InterfaceSplit();
+
 // A HUD draw's blend control (after the split, over transparent black): alpha SRC_ALPHA becomes ONE, so the layer's
 // alpha is the HUD's coverage (a + (1 - a) under), as the xenos path does. Else as given.
 uint32_t HudBlendControl(uint32_t blend_control);

@@ -533,7 +533,15 @@ REX_HOOK_RAW(sub_820FBE60) {
       static uint8_t interpolated[128];
       if (interpolated_frame != vr::GameSwapCount()) {
         interpolated_frame = vr::GameSwapCount();
+        float logic_camera[12], drawn_camera[12];  // rows right, up, at, pos: the state's, and as drawn (between)
+        for (int i = 0; i < 12; ++i) {
+          logic_camera[i] = LoadFloat(base, copy + 16 * (i / 3) + 4 * (i % 3));
+        }
         InterpolateCamera(base, copy);
+        for (int i = 0; i < 12; ++i) {
+          drawn_camera[i] = LoadFloat(base, copy + 16 * (i / 3) + 4 * (i % 3));
+        }
+        vr::NoteFrameCameras(logic_camera, drawn_camera);  // the race's markers (plume_vr.cpp PlaceMarker)
         std::memcpy(interpolated, xerenge::GuestPointer(base, copy), 128);
       } else {
         std::memcpy(xerenge::GuestPointer(base, copy), interpolated, 128);

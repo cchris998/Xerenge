@@ -48,6 +48,8 @@ struct FramePose {
   float t = 1.f;
   uint64_t serial = 0;
   std::chrono::steady_clock::time_point taken{};  // when its pose was taken (the headset's look-ahead measure)
+  bool cameras = false;  // the logic state's camera and the drawn one (NoteFrameCameras)
+  float logic_camera[12]{}, drawn_camera[12]{};
 };
 std::mutex g_pose_mutex;
 std::deque<FramePose> g_poses;  // presented frames' poses, in order, for the submissions
@@ -166,6 +168,7 @@ FramePose TakeBuiltFrame() {
   }
   FramePose frame;
   frame.taken = xr::CameraPoseTime();
+  frame.cameras = xr::TakeFrameCameras(frame.logic_camera, frame.drawn_camera);
   frame.posed = xr::TakeCameraPose(*reinterpret_cast<float(*)[16]>(frame.pose),
                                    *reinterpret_cast<float(*)[4]>(frame.tangents));
   // Named while the frame was built (burnout_vr.cpp InterpolateCamera, keyed by the swaps before its own).
@@ -356,7 +359,7 @@ struct Interpolation {
   uint32_t vp_width = 0;
   uint32_t draws = 0, interpolated = 0, paired = 0, found = 0, states = 0;  // development
   float max_move = 0.f;
-  std::vector<std::array<float, 3>> objects;  // development: this frame's draws' origins (ndc x, y, w) (MARKERTRACE)
+  std::vector<std::array<float, 3>> objects;  // this frame's scene draws' origins as drawn (ndc x, y, w): PlaceMarker
   float track_w = 0.f, track[4]{};  // development: the nearest moving draw's origin on screen (XERENGE_VR_INTERPTRACK)
   float sample[16]{};
 } g_interpolation;
@@ -403,6 +406,55 @@ void PlaceMarker(float* c, const float* centre) {
   if (turn && centre && frame.posed && frame.tangents[1] > 0.f && frame.tangents[2] > 0.f) {
     const float sx = 1.f / frame.tangents[1], sy = 1.f / frame.tangents[2];
     const float nx = centre[0] * c[4] + c[0], ny = centre[1] * c[5] + c[1];
+    float p[16] = {sx, 0.f, 0.f, 0.f, 0.f, sy, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 1.f, 0.f};
+    TurnViewSpaceDraw(p);
+    float v[4] = {nx * depth / sx, ny * depth / sy, depth, 1.f};
+    // Projected with the logic state's camera; the frame is drawn between states (the chase camera swinging round a
+    // corner: a far marker cars to the side of its car, Matt 2026-10-31). Through the world into the drawn camera's
+    // view space (axis i = sigma_i row i). XERENGE_VR_MARKER_CAMERA=0: not.
+    static const bool recamera =
+        !(std::getenv("XERENGE_VR_MARKER_CAMERA") && std::getenv("XERENGE_VR_MARKER_CAMERA")[0] == '0');
+    if (recamera && frame.cameras) {
+      const float* sigma = ViewSigns() + 3;
+      const float* from = frame.logic_camera;
+      const float* to = frame.drawn_camera;
+      float world[3];
+      for (int k = 0; k < 3; ++k) {
+        world[k] = from[9 + k] + sigma[0] * v[0] * from[k] + sigma[1] * v[1] * from[3 + k] + sigma[2] * v[2] * from[6 + k];
+      }
+      const float d[3] = {world[0] - to[9], world[1] - to[10], world[2] - to[11]};
+      for (int i = 0; i < 3; ++i) {
+        v[i] = sigma[i] * (d[0] * to[3 * i] + d[1] * to[3 * i + 1] + d[2] * to[3 * i + 2]);
+      }
+    }
+    float clip[4];
+    for (int r = 0; r < 4; ++r) {
+      clip[r] = p[r * 4] * v[0] + p[r * 4 + 1] * v[1] + p[r * 4 + 2] * v[2] + p[r * 4 + 3] * v[3];
+    }
+    float fx = clip[3] > 0.1f ? clip[0] / clip[3] : nx;
+    const float fy = clip[3] > 0.1f ? clip[1] / clip[3] : ny;
+    // The game eases a marker's place on screen after its car: a car crossing the view (a corner) left its marker up
+    // to 260 px (of 3840) beside it, catching up over ~8 frames (simulator race, each marker against its car: the
+    // object below it at its distance; Matt 2026-10-31: "The car itself moving is what caused the marker to move off
+    // the car"). Put over its car as drawn this frame: the nearest object origin below it within 15% of its distance.
+    // XERENGE_VR_MARKER_SNAP=0: not.
+    static const bool snap = !(std::getenv("XERENGE_VR_MARKER_SNAP") && std::getenv("XERENGE_VR_MARKER_SNAP")[0] == '0');
+    if (snap && clip[3] > 0.1f) {
+      float best = 0.15f;
+      bool found = false;
+      float car_x = 0.f;
+      std::scoped_lock lock{g_interpolation.mutex};
+      for (const auto& o : g_interpolation.objects) {
+        const float dx = std::fabs(o[0] - fx), dy = o[1] - fy;
+        if (dy < 0.f && dy > -0.3f && std::fabs(o[2] - clip[3]) < 0.15f * clip[3] && dx < best) {
+          best = dx, car_x = o[0], found = true;
+        }
+      }
+      if (found) {
+        clip[0] = car_x * clip[3];
+        fx = car_x;
+      }
+    }
     if (static const bool log = std::getenv("XERENGE_VR_MARKERTRACE") != nullptr; log) {  // development
       static uint64_t traced = 0;
       if (traced != frame.serial) {
@@ -412,23 +464,16 @@ void PlaceMarker(float* c, const float* centre) {
         {
           std::scoped_lock lock{g_interpolation.mutex};
           for (const auto& o : g_interpolation.objects) {
-            const float dx = o[0] - nx, dy = o[1] - ny;
+            const float dx = o[0] - fx, dy = o[1] - fy;
             if (dy < 0.f && dy > -0.2f && std::fabs(dx) < best) {
               best = std::fabs(dx), best_w = o[2], bx = o[0], by = o[1];
             }
           }
         }
-        REXLOG_INFO("VR marker trace: frame {} game ndc {:.4f} {:.4f} depth {:.1f} head yaw {:.2f}; nearest object below "
-                    "at {:.4f} {:.4f} w {:.1f}", frame.serial, nx, ny, depth,
+        REXLOG_INFO("VR marker trace: frame {} drawn ndc {:.4f} {:.4f} depth {:.1f} head yaw {:.2f}; nearest object below "
+                    "at {:.4f} {:.4f} w {:.1f}", frame.serial, fx, fy, clip[3],
                     std::atan2(-frame.pose[8], frame.pose[10]) * 57.29578f, bx, by, best_w);
       }
-    }
-    float p[16] = {sx, 0.f, 0.f, 0.f, 0.f, sy, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 1.f, 0.f};
-    TurnViewSpaceDraw(p);
-    const float v[4] = {nx * depth / sx, ny * depth / sy, depth, 1.f};
-    float clip[4];
-    for (int r = 0; r < 4; ++r) {
-      clip[r] = p[r * 4] * v[0] + p[r * 4 + 1] * v[1] + p[r * 4 + 2] * v[2] + p[r * 4 + 3] * v[3];
     }
     if (clip[3] > 0.1f) {
       c[0] += clip[0] / clip[3] - nx;
@@ -523,9 +568,6 @@ bool InterpolateDraw(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uin
   if (!vi.have_vp || target_width != vi.vp_width) {
     return false;  // before the camera's first draw, or another target (shadows, reflections)
   }
-  if (static const bool trace = std::getenv("XERENGE_VR_MARKERTRACE") != nullptr; trace && c[15] > 1.f && vi.objects.size() < 4096) {
-    vi.objects.push_back({c[3] / c[15], c[7] / c[15], c[15]});  // development
-  }
   float world[16];
   Multiply4(vi.vp_inverse, c, world);
   const uint32_t index = vi.counters[mesh_key]++;
@@ -536,7 +578,13 @@ bool InterpolateDraw(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uin
   }
   ++vi.draws;
   const auto before = vi.prev.find(mesh_key);
+  const auto note_object = [&](const float* m) {  // its origin where it is drawn (the markers' cars)
+    if (m[15] > 1.f && vi.objects.size() < 4096) {
+      vi.objects.push_back({m[3] / m[15], m[7] / m[15], m[15]});
+    }
+  };
   if (frame.t >= 0.999f || before == vi.prev.end()) {
+    note_object(c);
     return false;
   }
   ++vi.paired;
@@ -574,6 +622,7 @@ bool InterpolateDraw(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uin
     }
   }
   if (!moved) {
+    note_object(c);
     return false;
   }
   float between[16];
@@ -581,6 +630,7 @@ bool InterpolateDraw(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uin
     between[i] = (*from)[i] + (world[i] - (*from)[i]) * frame.t;
   }
   Multiply4(vi.vp, between, wvp_out);
+  note_object(wvp_out);
   ++vi.interpolated;
   // The player car: nearest the bottom middle of the view, 3-12 m ahead.
   const auto off_centre = [](float x, float y) { return x * x + (y + 0.4f) * (y + 0.4f); };

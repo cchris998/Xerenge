@@ -236,9 +236,6 @@ const std::vector<Setting>& Settings() {
                   {"5120X5760", "4x8"}, {"6400X5760", "5x8"}, {"7680X5760", "6x8"}},
                  0});
     s.push_back({18, kGraphics, "VR FRAME CAP", "vr_frame_cap", {{"OFF", "1"}, {"1/2", "2"}, {"1/3", "3"}}, 0});
-    // DLSS in VR (needs an RTX card): DLAA at the eye size, or upscaling it to 1.5x / 2x for the headset.
-    s.push_back({19, kGraphics, "VR DLSS", "vr_dlss",
-                 {{"OFF", "off"}, {"DLAA", "dlaa"}, {"UPSCALE 1.5X", "1.5"}, {"UPSCALE 2X", "2"}}, 0});
 
     // The frame rates: 30 is fps_30, 120 frame_generation (for the race and
     // Crash mode alike), Crash mode's 60 crash_interpolation.

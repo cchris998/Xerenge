@@ -192,12 +192,8 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
   if (!std::getenv("MCLA_VR_DIRECT_RESOLVE")) {
     _putenv_s("MCLA_VR_DIRECT_RESOLVE", "1");
   }
-  // DLSS's inputs: the scene is drawn in three tiles at 2x MSAA (each tile's depth rows at its resolve, sample 0), and
-  // the static world's vertex shaders draw with the camera's view-projection as their WVP (the world at the identity:
-  // the camera, and the others' worlds from it for their own motion). Set by hand wins.
-  if (!std::getenv("MCLA_VR_DLSS_TILES")) {
-    _putenv_s("MCLA_VR_DLSS_TILES", "1");
-  }
+  // The static world's vertex shaders draw with the camera's view-projection as their WVP (the world at the identity):
+  // the camera, and the other draws' worlds from it for drawing between logic steps. Set by hand wins.
   if (!std::getenv("MCLA_VR_CAMERA_VS")) {
     _putenv_s("MCLA_VR_CAMERA_VS", "C3FF17490757589F,1A563CA9A421178A,ACB68BA117ABC107");
   }
@@ -243,14 +239,6 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
   if (!std::getenv("XERENGE_NO_MOTION_BLUR") &&
       !xerenge::settings::ConfString("motion_blur", "true").starts_with("true")) {
     _putenv_s("XERENGE_NO_MOTION_BLUR", "1");
-  }
-  // DLSS (VR DLSS, vr_dlss: off, dlaa, or an upscale 1.5 / 2 of the eye size for the headset).
-  if (!from_command_line("vr_dlss") && !from_command_line("vr_dlss_output_scale")) {
-    const std::string dlss = xerenge::settings::ConfString("vr_dlss", "off");
-    if (dlss == "dlaa" || dlss == "1.5" || dlss == "2") {
-      rex::cvar::SetFlagByName("vr_dlss", "true");
-      rex::cvar::SetFlagByName("vr_dlss_output_scale", dlss == "dlaa" ? "1.0" : dlss.c_str());
-    }
   }
   // The SDK lowers the eye size when video memory looks short, by Midnight Club's estimate (1.05 GB a unit of scale
   // area): Burnout's render targets take far less (4.9 GB at 5x6), and its estimate held 4x6 (5120x4320, 90 FPS at

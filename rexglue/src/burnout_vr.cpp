@@ -25,6 +25,14 @@
 #include <string>
 
 #include <fmt/format.h>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <tlhelp32.h>
+#endif
+#include <thread>
 #include <rex/cvar.h>
 #include <rex/hook.h>
 #include <rex/input/input_system.h>
@@ -40,6 +48,8 @@
 
 extern "C" void __imp__sub_820FBE60(PPCContext& __restrict, uint8_t*);
 extern "C" void __imp__sub_8234ABC0(PPCContext& __restrict, uint8_t*);
+extern "C" void __imp__sub_8259C328(PPCContext& __restrict, uint8_t*);
+extern "C" void __imp__sub_8259C400(PPCContext& __restrict, uint8_t*);
 
 namespace vr = rex::ui::vulkan::vr;
 
@@ -162,6 +172,10 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
     // Drawing between logic steps: the camera turned to the frame's moment here, the moving draws moved with it by
     // plume_vr.cpp InterpolateDraw (Matt 2026-10-30: the car selection's turning camera "very jerky" against the head:
     // 60 steps a second under 90 Hz frames). XERENGE_VR_INTERPOLATE=0: off.
+    // The race camera's shake, scaled 0 (none) to 1 by xerenge.conf camera_shake, 0.25 by default (RaceCameraRotation).
+    if (!std::getenv("XERENGE_VR_CAMERA_SHAKE")) {
+      _putenv_s("XERENGE_VR_CAMERA_SHAKE", xerenge::settings::ConfString("camera_shake", "0.25").c_str());
+    }
     // The static world's vertex shaders (one WVP, the camera's VP): the other draws' worlds are taken from it.
     if (!std::getenv("MCLA_VR_CAMERA_VS")) {
       _putenv_s("MCLA_VR_CAMERA_VS", "C3FF17490757589F,1A563CA9A421178A,ACB68BA117ABC107");
@@ -294,6 +308,7 @@ struct CameraState {
   double state = -1.0;
   float rows[4][3]{};
 };
+
 std::mutex g_camera_states_mutex;
 std::array<CameraState, 4> g_camera_states;  // the latest last
 bool InterpolationOn() {
@@ -312,6 +327,11 @@ void NoteCameraState(uint8_t* base, uint32_t matrix) {
     for (int k = 0; k < 3; ++k) {
       c.rows[r][k] = LoadFloat(base, matrix + 16 * r + 4 * k);
     }
+  }
+  if (static const bool log = std::getenv("XERENGE_VR_CAMSTATELOG") != nullptr; log) {  // development
+    REXLOG_INFO("VR camera state {} pos {:.4f} {:.4f} {:.4f} at {:.5f} {:.5f} {:.5f} up {:.5f} {:.5f} {:.5f}", state,
+                c.rows[3][0], c.rows[3][1], c.rows[3][2], c.rows[2][0], c.rows[2][1], c.rows[2][2], c.rows[1][0],
+                c.rows[1][1], c.rows[1][2]);
   }
   std::scoped_lock lock{g_camera_states_mutex};
   if (g_camera_states.back().state == state) {
@@ -451,6 +471,138 @@ void PoseRwMatrix(uint8_t* base, uint32_t m, const float (&pose)[16]) {
   }
 }
 
+// Development (XERENGE_VR_WATCH_CAMERA=1): which code writes the camera object CGtViewport::Update reads (its
+// quaternion at +32, position at +48) - a CPU write breakpoint (DR0, DR1) on every thread, the writers' host addresses
+// named by the guest function they belong to (PPCFuncMappings), logged every 2 s. To find the boost's shake.
+#ifdef _WIN32
+namespace camera_watch {
+std::atomic<uint64_t> g_hits[32];
+std::atomic<uint32_t> g_counts[32];
+uint32_t g_armed_object = 0;
+
+LONG CALLBACK Handler(EXCEPTION_POINTERS* info) {
+  if (info->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP || !(info->ContextRecord->Dr6 & 3)) {
+    return EXCEPTION_CONTINUE_SEARCH;
+  }
+  const uint64_t rip = info->ContextRecord->Rip;
+  for (int i = 0; i < 32; ++i) {
+    uint64_t seen = g_hits[i].load(std::memory_order_relaxed);
+    if (seen == rip || (seen == 0 && g_hits[i].compare_exchange_strong(seen, rip))) {
+      g_counts[i].fetch_add(1, std::memory_order_relaxed);
+      break;
+    }
+  }
+  info->ContextRecord->Dr6 = 0;
+  return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+void Arm(uint8_t* base, uint32_t object) {
+  static bool handler = false;
+  if (!handler) {
+    AddVectoredExceptionHandler(1, Handler);
+    handler = true;
+  }
+  const uint64_t quaternion = uint64_t(xerenge::GuestPointer(base, object + 32));
+  const uint64_t position = uint64_t(xerenge::GuestPointer(base, object + 48));
+  std::thread([quaternion, position] {
+    const DWORD self = GetCurrentThreadId();
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    THREADENTRY32 entry{sizeof(entry)};
+    int armed = 0;
+    for (BOOL more = Thread32First(snapshot, &entry); more; more = Thread32Next(snapshot, &entry)) {
+      if (entry.th32OwnerProcessID != GetCurrentProcessId() || entry.th32ThreadID == self) {
+        continue;
+      }
+      HANDLE thread = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE,
+                                 entry.th32ThreadID);
+      if (!thread) {
+        continue;
+      }
+      SuspendThread(thread);
+      CONTEXT context{};
+      context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+      if (GetThreadContext(thread, &context)) {
+        context.Dr0 = quaternion;
+        context.Dr1 = position;
+        // L0, L1; RW write (01); LEN 4 bytes (11)
+        context.Dr7 = (context.Dr7 & ~0xFF0003ull) | 1 | 4 | (1ull << 16) | (3ull << 18) | (1ull << 20) | (3ull << 22);
+        armed += SetThreadContext(thread, &context) ? 1 : 0;
+      }
+      ResumeThread(thread);
+      CloseHandle(thread);
+    }
+    CloseHandle(snapshot);
+    REXLOG_INFO("VR camera watch: armed on {} threads", armed);
+  }).join();
+}
+
+void Report() {
+  static auto since = std::chrono::steady_clock::now();
+  if (std::chrono::steady_clock::now() - since < std::chrono::seconds(2)) {
+    return;
+  }
+  since = std::chrono::steady_clock::now();
+  for (int i = 0; i < 32; ++i) {
+    const uint64_t rip = g_hits[i].load();
+    if (!rip) {
+      break;
+    }
+    // The guest function: the mapping whose host code starts nearest below.
+    uint64_t best = 0;
+    size_t guest = 0;
+    for (const PPCFuncMapping* m = PPCFuncMappings; m->host; ++m) {
+      const uint64_t host = uint64_t(m->host);
+      if (host <= rip && host > best) {
+        best = host, guest = m->guest;
+      }
+    }
+    REXLOG_INFO("VR camera watch: written from host {:X} = sub_{:08X}+{:X}, {} times", rip, guest, rip - best,
+                g_counts[i].load());
+  }
+}
+}  // namespace camera_watch
+#endif
+
+// The race camera's shake: the race camera (sub_822F5128) turns its view by three small axis-angle rotations, the
+// sin (sub_8259C328) and cos (sub_8259C400) of each angle taken at the return addresses below - the shake (Matt's boost
+// run 2026-10-31: each one near 0 driving, up to 0.02 rad boosting). Each angle is scaled by camera_shake in
+// xerenge.conf from 0 (none) to 1 (the game's), 0.25 by default (Matt 2026-10-31: "a dampener option to reduce the
+// shake, say 0 - 1"; "that works perfectly, lets have 0.25 be the default"). XERENGE_VR_CAMERA_SHAKE set by hand wins.
+// Development: XERENGE_VR_ROTLOG logs each angle.
+int RaceCameraRotation(uint32_t lr) {
+  switch (lr) {
+    case 0x822F56F8: case 0x822F5708: return 0;
+    case 0x822F5A30: case 0x822F5A40: return 1;
+    case 0x822F5D5C: case 0x822F5D6C: return 2;
+    default: return -1;
+  }
+}
+
+void TraceRaceCameraRotation(PPCContext& ctx, bool sine) {
+  const int which = RaceCameraRotation(uint32_t(ctx.lr));
+  if (which < 0) {
+    return;
+  }
+  if (sine && std::getenv("XERENGE_VR_ROTLOG")) {
+    REXLOG_INFO("VR race camera rotation {}: angle {:.5f}", which, ctx.f1.f64);
+  }
+  static const double shake = [] {
+    const char* v = std::getenv("XERENGE_VR_CAMERA_SHAKE");
+    return v ? std::clamp(std::atof(v), 0.0, 1.0) : 1.0;
+  }();
+  ctx.f1.f64 *= shake;
+}
+
+REX_HOOK_RAW(sub_8259C328) {
+  TraceRaceCameraRotation(ctx, true);
+  __imp__sub_8259C328(ctx, base);
+}
+
+REX_HOOK_RAW(sub_8259C400) {
+  TraceRaceCameraRotation(ctx, false);
+  __imp__sub_8259C400(ctx, base);
+}
+
 REX_HOOK_RAW(sub_820FBE60) {
   const uint32_t lr = uint32_t(ctx.lr);
   static const bool frame_log = std::getenv("XERENGE_VR_FRAMELOG") != nullptr;
@@ -474,6 +626,22 @@ REX_HOOK_RAW(sub_820FBE60) {
     g_camera_frame.store(ctx.r3.u32, std::memory_order_relaxed);
     if (vr::Active()) {
       NoteCameraState(base, ctx.r1.u32 + 80);  // the new matrix, on CGtViewport::Update's stack
+#ifdef _WIN32
+      if (static const bool watch = std::getenv("XERENGE_VR_WATCH_CAMERA") != nullptr; watch) {  // development
+        const uint32_t object = xerenge::LoadGuestU32(base, ctx.r30.u32 + 104);
+        if (object && object != camera_watch::g_armed_object) {
+          camera_watch::g_armed_object = object;
+          camera_watch::Arm(base, object);
+        }
+        camera_watch::Report();
+      }
+#endif
+      if (static int told = 0; told < 4 && std::getenv("XERENGE_VR_CAMSTATELOG")) {  // development
+        ++told;
+        const uint32_t object = xerenge::LoadGuestU32(base, ctx.r30.u32 + 104);
+        REXLOG_INFO("VR camera: viewport {:08X}, its camera object {:08X} (quaternion +32, position +48)", ctx.r30.u32,
+                    object);
+      }
     }
     if (vr::Active()) {
       // The pose this frame is built with; the view window (next) takes the headset's field of view.

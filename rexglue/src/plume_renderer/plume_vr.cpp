@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <array>
+#include <span>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -290,17 +291,20 @@ bool CameraVertexShader(uint64_t vs_hash) {
   return vs_hash != 0 && hashes.count(vs_hash) != 0;
 }
 
-// m = a b (row-major 4x4).
-void Multiply4(const float* a, const float* b, float* m) {
+// m = a b (row-major 4x4), in double whatever the operands: a world taken out of WVP and put back loses millimetres in
+// float far from the origin (Angel Valley is 4.8 km out: every part of every car jittered, Matt 2026-10-31).
+template <typename A, typename B, typename M>
+void Multiply4(const A* a, const B* b, M* m) {
   for (int r = 0; r < 4; ++r) {
     for (int c = 0; c < 4; ++c) {
-      m[r * 4 + c] = a[r * 4] * b[c] + a[r * 4 + 1] * b[4 + c] + a[r * 4 + 2] * b[8 + c] + a[r * 4 + 3] * b[12 + c];
+      m[r * 4 + c] = M(double(a[r * 4]) * b[c] + double(a[r * 4 + 1]) * b[4 + c] + double(a[r * 4 + 2]) * b[8 + c] +
+                       double(a[r * 4 + 3]) * b[12 + c]);
     }
   }
 }
 
 // The inverse by cofactors (in double: a projection's rows differ by orders of magnitude).
-bool Invert4(const float* f, float* out) {
+bool Invert4(const double* f, double* out) {
   double m[16], inv[16];
   for (int i = 0; i < 16; ++i) {
     m[i] = f[i];
@@ -342,26 +346,91 @@ bool Invert4(const float* f, float* out) {
     return false;
   }
   for (int i = 0; i < 16; ++i) {
-    out[i] = float(inv[i] / det);
+    out[i] = inv[i] / det;
   }
   return true;
 }
+
+// A scene draw of a logic state: its world, its place relative to the state's camera, its travel a step (from its pair
+// the state before, if it had one), and the frame that last paired it.
+struct StepDraw {
+  std::array<double, 16> m;
+  double at[3]{};  // its mesh's centre in the world (InterpolateDraw's `centre`; its origin without one)
+  double rel[3]{};
+  double travel[3]{};
+  double origin_rel[3]{}, origin_travel[3]{};  // the same for its matrix's origin
+  bool moving = false;
+  uint64_t used = 0;
+};
+
+// A draw's world (W, WVP = VP W) from its WVP, by VP's x, y and w rows: the z row is the w row but for its translation
+// (z = w - near: an infinite far plane), and VP inverted whole was near singular - 4.8 km out (Angel Valley, VP's
+// translations ~2000) float's rounding of those translations put a draw's world metres off, differently each frame,
+// and its parts lost their pairs between steps: drawn some between steps, some not, the cars came apart (Matt
+// 2026-10-31: wobbling cars, wheels coming and going). x, y and w alone are well conditioned and fix W.
+bool InvertXyw(const double* vp, double* out) {
+  const double a[9] = {vp[0], vp[1], vp[2], vp[4], vp[5], vp[6], vp[12], vp[13], vp[14]};
+  const double det = a[0] * (a[4] * a[8] - a[5] * a[7]) - a[1] * (a[3] * a[8] - a[5] * a[6]) +
+                     a[2] * (a[3] * a[7] - a[4] * a[6]);
+  if (std::fabs(det) < 1e-12) {
+    return false;
+  }
+  out[0] = (a[4] * a[8] - a[5] * a[7]) / det;
+  out[1] = (a[2] * a[7] - a[1] * a[8]) / det;
+  out[2] = (a[1] * a[5] - a[2] * a[4]) / det;
+  out[3] = (a[5] * a[6] - a[3] * a[8]) / det;
+  out[4] = (a[0] * a[8] - a[2] * a[6]) / det;
+  out[5] = (a[2] * a[3] - a[0] * a[5]) / det;
+  out[6] = (a[3] * a[7] - a[4] * a[6]) / det;
+  out[7] = (a[1] * a[6] - a[0] * a[7]) / det;
+  out[8] = (a[0] * a[4] - a[1] * a[3]) / det;
+  return true;
+}
+
+void WorldOf(const double* vp, const double* xyw_inverse, const float* c, double* world) {
+  const int rows[3] = {0, 1, 3};
+  for (int j = 0; j < 4; ++j) {  // W's column j: (x, y, z, h), h 1 for the translation
+    double rhs[3];
+    for (int k = 0; k < 3; ++k) {
+      rhs[k] = double(c[rows[k] * 4 + j]) - (j == 3 ? vp[rows[k] * 4 + 3] : 0.0);
+    }
+    for (int r = 0; r < 3; ++r) {
+      world[r * 4 + j] = xyw_inverse[r * 3] * rhs[0] + xyw_inverse[r * 3 + 1] * rhs[1] + xyw_inverse[r * 3 + 2] * rhs[2];
+    }
+    world[12 + j] = j == 3 ? 1.0 : 0.0;
+  }
+}
+
+// A draw drawn between steps with its own pair (InterpolateDraw): carries the draws near it that have none.
+struct Carrier {
+  std::array<double, 16> from, to;
+  double at[3]{};  // its centre at `to`
+  double state = 0.0, span = 1.0;
+};
 
 struct Interpolation {
   std::mutex mutex;
   uint64_t serial = 0;  // the frame (FramePose::serial)
   double state = -1.0;
+  double prev_state = -1.0;  // the state prev holds (frames running several steps: more than one before)
   bool recording = false;
-  std::unordered_map<uint64_t, std::vector<std::array<float, 16>>> prev, curr;
-  std::unordered_map<uint64_t, uint32_t> counters;
+  std::unordered_map<uint64_t, std::vector<StepDraw>> prev, curr;
   bool have_vp = false;
-  float vp[16]{}, vp_inverse[16]{};
+  double vp[16]{};
+  double xyw_inverse[9]{};  // VP's x, y and w rows' 3x3 inverted (WorldOf)
   uint32_t vp_width = 0;
+  double eye[3]{};  // the logic state's camera (FramePose::logic_camera), else the frame's
+  std::unordered_map<uint64_t, uint32_t> counters;  // this frame's draws so far by mesh
+  std::vector<Carrier> carriers, last_carriers;
+  // This frame's motion (drawn world over the state's) by world: the draws of one body share their world (a car's
+  // panels, a wheel's tyre and rim), and are drawn as the first of them was.
+  std::unordered_map<uint64_t, std::array<double, 16>> body_motion;  // this frame's and the frame before's moving draws (InterpolateDraw)
+  uint32_t carried = 0;  // development
   uint32_t draws = 0, interpolated = 0, paired = 0, found = 0, states = 0;  // development
   float max_move = 0.f;
   std::vector<std::array<float, 3>> objects;  // this frame's scene draws' origins as drawn (ndc x, y, w): PlaceMarker
   float track_w = 0.f, track[4]{};  // development: the nearest moving draw's origin on screen (XERENGE_VR_INTERPTRACK)
-  float sample[16]{};
+  double sample[16]{};
 } g_interpolation;
 }  // namespace
 
@@ -510,7 +579,7 @@ void PlaceMarker(float* c, const float* centre) {
 }
 
 bool InterpolateDraw(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uint32_t target_width, const float* c,
-                     float* wvp_out) {
+                     const float* centre, float* wvp_out) {
   const FramePose& frame = g_frame;
   if (!Stereo() || !frame.posed || !frame.interpolated || !depth_tested) {
     return false;
@@ -530,13 +599,19 @@ bool InterpolateDraw(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uin
     }
     vi.track_w = 0.f;
     vi.serial = frame.serial;
+    vi.body_motion.clear();
     vi.counters.clear();
+    if (!vi.carriers.empty()) {
+      vi.last_carriers = std::move(vi.carriers);
+      vi.carriers.clear();
+    }
     vi.have_vp = false;
     vi.recording = frame.state != vi.state;
     if (vi.recording) {
       ++vi.states;
       if (frame.state > vi.state && frame.state - vi.state <= 4.0) {
         vi.prev = std::move(vi.curr);
+        vi.prev_state = vi.state;
       } else {
         vi.prev.clear();  // the timer started over, or a long gap
       }
@@ -559,76 +634,427 @@ bool InterpolateDraw(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uin
   }
   if (CameraVertexShader(vs_hash)) {
     if (!vi.have_vp) {
-      std::memcpy(vi.vp, c, sizeof(vi.vp));
-      vi.have_vp = Invert4(vi.vp, vi.vp_inverse);
+      for (int i = 0; i < 16; ++i) {
+        vi.vp[i] = c[i];
+      }
+      vi.have_vp = InvertXyw(vi.vp, vi.xyw_inverse);
       vi.vp_width = target_width;
+      if (frame.cameras) {
+        for (int k = 0; k < 3; ++k) {
+          vi.eye[k] = frame.logic_camera[9 + k];
+        }
+      } else if (vi.have_vp) {  // the point clip x, y and w are 0 at
+        const double t[3] = {vi.vp[3], vi.vp[7], vi.vp[15]};
+        for (int k = 0; k < 3; ++k) {
+          vi.eye[k] = -(vi.xyw_inverse[k * 3] * t[0] + vi.xyw_inverse[k * 3 + 1] * t[1] + vi.xyw_inverse[k * 3 + 2] * t[2]);
+        }
+      }
     }
     return false;
   }
   if (!vi.have_vp || target_width != vi.vp_width) {
     return false;  // before the camera's first draw, or another target (shadows, reflections)
   }
-  float world[16];
-  Multiply4(vi.vp_inverse, c, world);
-  const uint32_t index = vi.counters[mesh_key]++;
-  if (vi.recording) {
-    auto& list = vi.curr[mesh_key];
-    list.emplace_back();
-    std::memcpy(list.back().data(), world, sizeof(world));
+  // Drawn about the camera (its origin at the eye: w 0 there - vs FDA2FB150FC94348, 495AAFB282D2A23E in Angel Valley):
+  // its "world" is the camera's place, and blended between two steps it moved by the camera's travel, up to 2.4 m a
+  // step with the car parked, and the parts drawn over it came and went (Matt 2026-10-31: wobbling cars, missing
+  // wheels). Drawn as it is.
+  if (c[15] < 0.5f) {
+    return false;
   }
+  double world[16];
+  WorldOf(vi.vp, vi.xyw_inverse, c, world);
   ++vi.draws;
-  const auto before = vi.prev.find(mesh_key);
   const auto note_object = [&](const float* m) {  // its origin where it is drawn (the markers' cars)
     if (m[15] > 1.f && vi.objects.size() < 4096) {
       vi.objects.push_back({m[3] / m[15], m[7] / m[15], m[15]});
     }
   };
-  if (frame.t >= 0.999f || before == vi.prev.end()) {
-    note_object(c);
-    return false;
+  // Where it is: its mesh's centre (a wheel's hub), not its origin - a wheel's origin is off its axle, and swings round
+  // it metres a step as the wheel turns. And that relative to the logic state's camera (the frame's camera without it).
+  double here[3] = {world[3], world[7], world[11]};
+  if (centre) {
+    for (int r = 0; r < 3; ++r) {
+      here[r] = world[r * 4] * centre[0] + world[r * 4 + 1] * centre[1] + world[r * 4 + 2] * centre[2] + world[r * 4 + 3];
+    }
   }
-  ++vi.paired;
-  // The same draw the state before: the same place among the mesh's draws when it has not moved (a centimetre), else the
-  // nearest within a step's travel (metres). Not the same place within the travel: identical props (posts, cones) swap
-  // places in the draw order as the view culls them, and one was drawn sliding into its neighbour.
-  const auto distance2 = [&](const std::array<float, 16>& m) {
-    const float x = m[3] - world[3], y = m[7] - world[7], z = m[11] - world[11];
-    return x * x + y * y + z * z;
+  const double rel[3] = {here[0] - vi.eye[0], here[1] - vi.eye[1], here[2] - vi.eye[2]};
+  // The same draw the state before. A mesh is often drawn several times close together (Angel Valley's chase view: the
+  // cars beside each other on the grid, the wheels, the panels), and its draws come and go between steps as the view
+  // culls them: taking the nearest of the mesh's draws paired one with its neighbour when its own was missing, and it
+  // was drawn sliding up to the spacing (Matt 2026-10-31: wobbling cars, wheels coming and going). A draw is paired for
+  // sure only where it should be, within kNear: where it was (still), where its own travel the step before puts it, or
+  // where it was relative to the camera (moving with it: the player's car) - by its centre, or by its matrix's origin;
+  // each draw of the state before once. Else the nearest gives it a travel for the next step to pair it by, and it is
+  // drawn as it is or carried (below).
+  const double span = std::max(1.0, vi.state - vi.prev_state);
+  const double origin_rel[3] = {world[3] - vi.eye[0], world[7] - vi.eye[1], world[11] - vi.eye[2]};
+  // How far the matrix's origin is from where the state before's draw `d` puts it: still, on by its travel, or the
+  // same relative to the camera.
+  const auto origin_cost = [&](const StepDraw& d) {
+    const auto l = [](double x, double y, double z) { return std::sqrt(x * x + y * y + z * z); };
+    double cost = l(world[3] - d.m[3], world[7] - d.m[7], world[11] - d.m[11]);
+    if (d.moving) {
+      cost = std::min(cost, l(world[3] - d.m[3] - d.origin_travel[0] * span, world[7] - d.m[7] - d.origin_travel[1] * span,
+                              world[11] - d.m[11] - d.origin_travel[2] * span));
+    }
+    return std::min(cost, l(origin_rel[0] - d.origin_rel[0], origin_rel[1] - d.origin_rel[1],
+                            origin_rel[2] - d.origin_rel[2]));
   };
-  constexpr float kStep2 = 4.f * 4.f;
-  const std::array<float, 16>* from = nullptr;
-  if (index < before->second.size() && distance2(before->second[index]) < 0.01f * 0.01f) {
-    from = &before->second[index];
-  } else {
-    float nearest = kStep2;
-    for (const auto& m : before->second) {
-      if (const float d = distance2(m); d < nearest) {
-        nearest = d;
-        from = &m;
+  constexpr double kNear = 0.12;  // metres: a step changes a car's speed by millimetres; its parts are metres apart
+  const auto length = [](double x, double y, double z) { return std::sqrt(x * x + y * y + z * z); };
+  const auto before = vi.prev.find(mesh_key);
+  const uint32_t index = vi.counters[mesh_key]++;
+  StepDraw* from = nullptr;
+  bool sure = false;
+  if (before != vi.prev.end()) {
+    ++vi.paired;
+    double best = kNear;
+    // First the same place among the mesh's draws, if still there (a millimetre): most draws (the scenery, a mesh
+    // drawn hundreds of times: posts, trees) are, and the search below goes through them all.
+    if (index < before->second.size()) {
+      StepDraw& d = before->second[index];
+      if (d.used != frame.serial && length(here[0] - d.at[0], here[1] - d.at[1], here[2] - d.at[2]) < 0.001) {
+        from = &d;
+        best = 0.0;
+      }
+    }
+    for (StepDraw& d : from ? std::span<StepDraw>{} : std::span<StepDraw>{before->second}) {
+      if (d.used == frame.serial) {
+        continue;
+      }
+      double cost = length(here[0] - d.at[0], here[1] - d.at[1], here[2] - d.at[2]);
+      if (d.moving) {
+        cost = std::min(cost, length(here[0] - d.at[0] - d.travel[0] * span, here[1] - d.at[1] - d.travel[1] * span,
+                                     here[2] - d.at[2] - d.travel[2] * span));
+      }
+      cost = std::min(cost, length(rel[0] - d.rel[0], rel[1] - d.rel[1], rel[2] - d.rel[2]));
+      // And by its matrix's origin: a mesh whose centre is off its matrix's turn (a part 2.5 m from it, on a car
+      // turning more than 5 degrees a step) swings with it, while the origin goes straight.
+      cost = std::min(cost, origin_cost(d));
+      if (cost < best) {
+        best = cost;
+        from = &d;
+      }
+    }
+    sure = from != nullptr;
+    if (!from) {
+      // Not sure: the nearest, for its travel only (not drawn between steps by it, and not taken from the draws that
+      // pair by place) - right, the next step pairs it by that travel; wrong, it does not (dust, the sparks).
+      double nearest = 4.0 * span;
+      for (StepDraw& d : before->second) {
+        if (const double l = length(here[0] - d.at[0], here[1] - d.at[1], here[2] - d.at[2]); l < nearest) {
+          nearest = l;
+          from = &d;
+        }
+      }
+    } else {
+      from->used = frame.serial;
+    }
+  }
+  if (vi.recording) {
+    StepDraw& d = vi.curr[mesh_key].emplace_back();
+    std::memcpy(d.m.data(), world, sizeof(world));
+    std::memcpy(d.at, here, sizeof(here));
+    std::memcpy(d.rel, rel, sizeof(rel));
+    std::memcpy(d.origin_rel, origin_rel, sizeof(origin_rel));
+    if (from) {
+      d.moving = true;
+      for (int k = 0; k < 3; ++k) {
+        d.travel[k] = (here[k] - from->at[k]) / span;
+        d.origin_travel[k] = (world[3 + 4 * k] - from->m[3 + 4 * k]) / span;
       }
     }
   }
-  // Moved: by more than the rounding of a world taken back out of WVP (a millimetre, 1e-4 of the axes).
-  bool moved = false;
-  for (int i = 0; from && i < 16 && !moved; ++i) {
-    moved = std::fabs((*from)[i] - world[i]) > (i == 3 || i == 7 || i == 11 ? 1e-3f : 1e-4f);
+  // Development (XERENGE_VR_CARCHECK): the player car's draws (3-9 m ahead, bottom middle) by how they were drawn.
+  struct CarTally {
+    uint64_t serial = 0;
+    uint32_t own = 0, carried = 0, still = 0, loose = 0;
+    float t = 0.f;
+    std::string shifts;
+    bool have_ref = false;  // the player car's body (A64F) this frame: its motion and centre
+    double ref_motion[16]{}, ref_at[3]{};
+    std::string rigid;  // each draw near it: how far (mm) from where the body's motion puts it
+  };
+  static CarTally tally;
+  static const bool check = std::getenv("XERENGE_VR_CARCHECK") != nullptr;
+  const bool in_car = check && c[15] > 3.f && c[15] < 9.f && std::fabs(c[3] / c[15]) < 0.25f && c[7] / c[15] < 0.f;
+  if (check && tally.serial != frame.serial) {
+    if (tally.own + tally.carried + tally.loose) {
+      REXLOG_INFO("VR carcheck: frame {} t {:.2f}: {} own, {} carried, {} still, {} loose;{}", tally.serial, tally.t,
+                  tally.own, tally.carried, tally.still, tally.loose, tally.shifts);
+      if (tally.have_ref) {
+        REXLOG_INFO("VR rigid: frame {} t {:.2f}:{}", tally.serial, tally.t, tally.rigid);
+      }
+    }
+    tally = {};
+    tally.serial = frame.serial;
+    tally.t = frame.t;
   }
-  vi.found += from ? 1 : 0;
-  if (from) {
-    const float d = std::fabs((*from)[3] - world[3]) + std::fabs((*from)[7] - world[7]) + std::fabs((*from)[11] - world[11]);
-    if (d >= vi.max_move) {
-      vi.max_move = d;
-      std::memcpy(vi.sample, world, sizeof(world));
+  // Development (XERENGE_VR_CARCHECK): draws with the same world are one body's parts and must be drawn the same.
+  struct GroupTally {
+    uint64_t serial = 0;
+    std::unordered_map<uint64_t, std::array<double, 4>> first;  // world -> drawn shift, w
+    std::unordered_map<uint64_t, std::string> who;  // world -> the first's key and path
+    int told = 0;
+    uint32_t groups_checked = 0, split = 0;
+    double worst = 0.0, worst_w = 0.0;
+  };
+  static GroupTally groups;
+  if (check && groups.serial != frame.serial) {
+    if (groups.groups_checked) {
+      REXLOG_INFO("VR groupcheck: frame {} t {:.2f}: {} same-world draws checked, {} drawn apart, worst {:.0f} mm at "
+                  "{:.1f} m", groups.serial, frame.t, groups.groups_checked, groups.split, groups.worst * 1000.0,
+                  groups.worst_w);
+    }
+    groups.first.clear();
+    groups.who.clear();
+    groups.serial = frame.serial;
+    groups.groups_checked = groups.split = 0;
+    groups.worst = groups.worst_w = 0.0;
+  }
+  const auto group_check = [&](const double* drawn, char path) {
+    if (!check || frame.t >= 0.999f || c[15] > 60.f) {
+      return;
+    }
+    uint64_t h = 1469598103934665603ull;
+    for (int i = 0; i < 12; ++i) {
+      h = (h ^ uint64_t(int64_t(std::llround(world[i] * 1000.0)))) * 1099511628211ull;
+    }
+    const double shift[3] = {drawn ? drawn[3] - world[3] : 0.0, drawn ? drawn[7] - world[7] : 0.0,
+                             drawn ? drawn[11] - world[11] : 0.0};
+    const auto [it, added] = groups.first.try_emplace(h, std::array<double, 4>{shift[0], shift[1], shift[2], c[15]});
+    const std::string me = fmt::format("{:016X} {}{} ({:.0f} {:.0f} {:.0f} mm) centre {}", mesh_key, path,
+                                       sure ? "s" : from ? "u" : "-", shift[0] * 1000.0, shift[1] * 1000.0,
+                                       shift[2] * 1000.0,
+                                       centre ? fmt::format("{:.3f} {:.3f} {:.3f}", centre[0], centre[1], centre[2])
+                                              : std::string("none"));
+    if (added) {
+      groups.who[h] = me;
+    } else {
+      ++groups.groups_checked;
+      const double d = length(shift[0] - it->second[0], shift[1] - it->second[1], shift[2] - it->second[2]);
+      groups.split += d > 0.005;
+      if (d > 0.005 && groups.told < 400 && frame.serial % 50 == 0) {
+        ++groups.told;
+        REXLOG_INFO("VR groupsplit: frame {} w {:.1f} vs {:016X}: {} against {}", frame.serial, c[15], vs_hash, me,
+                    groups.who[h]);
+      }
+      if (d > groups.worst) {
+        groups.worst = d;
+        groups.worst_w = c[15];
+      }
+    }
+  };
+  const auto rigid_check = [&](const double* drawn, char path) {
+    group_check(drawn, path);
+    if (!check || !tally.have_ref || frame.t >= 0.999f ||
+        length(here[0] - tally.ref_at[0], here[1] - tally.ref_at[1], here[2] - tally.ref_at[2]) > 3.0) {
+      return;
+    }
+    const double* m = drawn ? drawn : world;
+    double actual[3], expected[3];
+    const double* r = tally.ref_motion;
+    for (int k = 0; k < 3; ++k) {
+      actual[k] = centre ? m[k * 4] * centre[0] + m[k * 4 + 1] * centre[1] + m[k * 4 + 2] * centre[2] + m[k * 4 + 3]
+                         : m[k * 4 + 3];
+      expected[k] = r[k * 4] * here[0] + r[k * 4 + 1] * here[1] + r[k * 4 + 2] * here[2] + r[k * 4 + 3];
+    }
+    tally.rigid += fmt::format(" {:04X}:{:.0f}", uint32_t(mesh_key & 0xFFFF),
+                               length(actual[0] - expected[0], actual[1] - expected[1], actual[2] - expected[2]) * 1000.0);
+  };
+  static const bool draws =
+      !(std::getenv("XERENGE_VR_INTERPOLATE_DRAWS") && std::getenv("XERENGE_VR_INTERPOLATE_DRAWS")[0] == '0');
+  // Another part of a body already drawn this frame (the same world): drawn as it was, whatever this one's pair - one
+  // part new to the step (a car 40 m out changing its detail) was drawn as it is and the rest between the steps, 15 cm
+  // apart.
+  uint64_t body = 1469598103934665603ull;
+  for (int i = 0; i < 12; ++i) {
+    body = (body ^ uint64_t(int64_t(std::llround(world[i] * 10000.0)))) * 1099511628211ull;
+  }
+  const auto drawn_as = [&](const double* drawn) {  // this body's motion, for its other parts
+    double motion[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    if (double inverse[16]; drawn && Invert4(world, inverse)) {
+      Multiply4(drawn, inverse, motion);
+    }
+    vi.body_motion.try_emplace(body).first->second = [&] {
+      std::array<double, 16> m;
+      std::memcpy(m.data(), motion, sizeof(motion));
+      return m;
+    }();
+  };
+  if (draws && frame.t < 0.999f) {
+    if (const auto mate = vi.body_motion.find(body); mate != vi.body_motion.end()) {
+      double as_mate[16];
+      Multiply4(mate->second.data(), world, as_mate);
+      rigid_check(as_mate, 'G');
+      Multiply4(vi.vp, as_mate, wvp_out);
+      note_object(wvp_out);
+      return true;
     }
   }
-  if (!moved) {
+  if (!draws || frame.t >= 0.999f || before == vi.prev.end()) {
+    if (draws && frame.t < 0.999f) {
+      drawn_as(nullptr);
+    }
+    tally.loose += in_car && frame.t < 0.999f;
+    rigid_check(nullptr, 'N');
+    if (in_car && frame.t < 0.999f) {
+      tally.shifts += fmt::format(" N{:04X}:0,0", uint32_t(mesh_key & 0xFFFF));
+    }
     note_object(c);
     return false;
   }
-  float between[16];
-  for (int i = 0; i < 16; ++i) {
-    between[i] = (*from)[i] + (world[i] - (*from)[i]) * frame.t;
+  // Turned since its pair, by more than a car turns in a step (5 degrees): a spinning wheel. A wheel's origin is off its
+  // axle (Angel Valley's player car: up to 3.5 m a step as it spins, the body 0.5 m), and blended between steps it left
+  // the car and shrank (two turns 90 degrees apart blended halfway are a flattened matrix): the wheels that came and
+  // went. Not blended, below.
+  const auto turn_cos = [](const double* a, const double* b) {
+    double dot = 0.0, na = 0.0, nb = 0.0;
+    for (int r = 0; r < 3; ++r) {
+      for (int k = 0; k < 3; ++k) {
+        dot += a[r * 4 + k] * b[r * 4 + k];
+        na += a[r * 4 + k] * a[r * 4 + k];
+        nb += b[r * 4 + k] * b[r * 4 + k];
+      }
+    }
+    // trace(A^T B) over the scales: 1 + 2 cos(angle) for rotations.
+    return (3.0 * dot / std::sqrt(std::max(na * nb, 1e-30)) - 1.0) / 2.0;
+  };
+  const bool turned = sure && turn_cos(from->m.data(), world) <= 0.996;
+  const bool own = sure && !turned;
+  double between[16];
+  if (turned) {
+    // Turned as the step has it, and moved by a point of it between the steps: its matrix's origin where that goes
+    // straight (every mesh on the matrix moved the same: a car turning hard), else its centre - a wheel's hub, its
+    // origin off the axle swinging round it.
+    const double u = 1.0 - (1.0 - double(frame.t)) / span;
+    const bool by_origin = origin_cost(*from) < kNear;
+    std::memcpy(between, world, sizeof(between));
+    for (int k = 0; k < 3; ++k) {
+      between[3 + 4 * k] -= (1.0 - u) * (by_origin ? world[3 + 4 * k] - from->m[3 + 4 * k] : here[k] - from->at[k]);
+    }
+    tally.carried += in_car;
+    ++vi.carried;
+  } else if (own) {
+    // Moved: by more than the rounding of a world taken back out of WVP (a millimetre, 1e-4 of the axes).
+    bool moved = false;
+    for (int i = 0; i < 16 && !moved; ++i) {
+      moved = std::fabs(from->m[i] - world[i]) > (i == 3 || i == 7 || i == 11 ? 1e-3f : 1e-4f);
+    }
+    ++vi.found;
+    if (!moved) {
+      rigid_check(nullptr, 'S');
+      tally.still += in_car;
+      note_object(c);
+      return false;
+    }
+    tally.own += in_car;
+    // The camera is drawn at t between the state before this one and this one; prev may be several states back (a
+    // frame that ran more than one logic step - Angel Valley at 7680x5760: the car's parts were blended over 2-5 steps
+    // by the camera's t, landing off the car and each other, Matt 2026-10-31). The same moment between prev's state and
+    // this.
+    const double u = 1.0 - (1.0 - double(frame.t)) / span;
+    for (int i = 0; i < 16; ++i) {
+      between[i] = from->m[i] + (world[i] - from->m[i]) * u;
+    }
+    // A carrier of the draws near it (moving, not only rounding).
+    if (vi.carriers.size() < 4096 &&
+        length(here[0] - from->at[0], here[1] - from->at[1], here[2] - from->at[2]) > 0.01) {
+      Carrier& carrier = vi.carriers.emplace_back();
+      carrier.from = from->m;
+      std::memcpy(carrier.to.data(), world, sizeof(world));
+      carrier.state = vi.state;
+      std::memcpy(carrier.at, here, sizeof(here));
+      carrier.span = span;
+    }
+  } else {
+    // Not paired for sure: carried by the nearest moving draw within 4.5 m of its centre (its car) - with its car, its
+    // turn as the step has it. Else as it is. The draws so far this frame, else the frame before's (a car's wheels
+    // drawn before its body): the same state's as they were, a state before's on by their travel.
+    const auto at = [&](const double* a) { return length(here[0] - a[0], here[1] - a[1], here[2] - a[2]); };
+    std::array<double, 16> carrier_from{}, carrier_to{};
+    double nearest = 4.5;
+    bool carried = false;
+    // And only one moving as it does (within 25 cm a step, by its nearest the step before): the dust and sparks about
+    // a car are near it but not of it, and carried with it they went with the car between steps and back at each.
+    const auto moves_with = [&](const std::array<double, 16>& k_from, const std::array<double, 16>& k_to, double k_span) {
+      if (!from) {
+        return false;
+      }
+      double d2 = 0.0;
+      for (int i = 0; i < 3; ++i) {
+        const double v = (here[i] - from->at[i]) / span - (k_to[3 + 4 * i] - k_from[3 + 4 * i]) / k_span;
+        d2 += v * v;
+      }
+      return d2 < 0.25 * 0.25;
+    };
+    for (size_t i = 0; from && i < vi.carriers.size(); ++i) {
+      const Carrier& k = vi.carriers[i];
+      if (const double d = at(k.at); d < nearest && moves_with(k.from, k.to, k.span)) {
+        nearest = d;
+        carrier_from = k.from, carrier_to = k.to;
+        carried = true;
+      }
+    }
+    if (!carried && from) {
+      for (const Carrier& k : vi.last_carriers) {
+        std::array<double, 16> f = k.from, to = k.to;
+        double where[3] = {k.at[0], k.at[1], k.at[2]};
+        if (k.state != vi.state) {  // the step after: from where it was by the same travel
+          if (vi.state <= k.state || vi.state - k.state > 4.0) {
+            continue;
+          }
+          const double steps = span / k.span;
+          f = k.to;
+          for (int i = 0; i < 3; ++i) {
+            to[3 + 4 * i] = k.to[3 + 4 * i] + (k.to[3 + 4 * i] - k.from[3 + 4 * i]) * steps;
+            where[i] += (k.to[3 + 4 * i] - k.from[3 + 4 * i]) * steps;
+          }
+        }
+        if (const double d = at(where); d < nearest && moves_with(k.from, k.to, k.span)) {
+          nearest = d;
+          carrier_from = f, carrier_to = to;
+          carried = true;
+        }
+      }
+    }
+    double inverse[16];
+    if (!carried || !Invert4(carrier_to.data(), inverse)) {
+      tally.loose += in_car;
+      drawn_as(nullptr);
+      rigid_check(nullptr, 'L');
+      if (in_car) {
+        tally.shifts += fmt::format(" L{:04X}:{}", uint32_t(mesh_key & 0xFFFF), sure ? "s" : from ? "u" : "-");
+      }
+      note_object(c);
+      return false;
+    }
+    // Its motion back to the frame's moment, applied to this draw.
+    const double u = 1.0 - (1.0 - double(frame.t)) / span;
+    double carrier_between[16], motion[16];
+    for (int i = 0; i < 16; ++i) {
+      carrier_between[i] = carrier_from[i] + (carrier_to[i] - carrier_from[i]) * u;
+    }
+    Multiply4(carrier_between, inverse, motion);
+    Multiply4(motion, world, between);
+    tally.carried += in_car;
+    ++vi.carried;
   }
+  if (in_car) {
+    tally.shifts += fmt::format(" {}{:04X}:{:.0f},{:.0f}", own ? 'O' : 'C', uint32_t(mesh_key & 0xFFFF),
+                                (between[3] - world[3]) * 1000.0, (between[11] - world[11]) * 1000.0);
+  }
+  if (check && own && in_car && !tally.have_ref && (mesh_key & 0xFFFF) == 0xA64F) {
+    double inverse[16];
+    if (Invert4(world, inverse)) {
+      Multiply4(between, inverse, tally.ref_motion);
+      std::memcpy(tally.ref_at, here, sizeof(here));
+      tally.have_ref = true;
+    }
+  }
+  drawn_as(between);
+  rigid_check(between, own ? 'O' : turned ? 'T' : 'C');
   Multiply4(vi.vp, between, wvp_out);
   note_object(wvp_out);
   ++vi.interpolated;

@@ -870,6 +870,10 @@ class PlumeDrawContext {
                       int32_t pos_fetch_const, uint32_t pos_float, uint32_t vertex_count,
                       memory::Memory* memory, float* staged, std::vector<uint32_t>& read_lo, std::vector<uint32_t>& read_hi,
                       uint32_t& fetched, uint32_t& fetch_addr, uint32_t& fetch_type) const;
+  // VR fork: a mesh's centre in its own space (its vertices' bounds), by the mesh key InterpolateDraw pairs draws by,
+  // unpacked once; null when it could not be read. A wheel's is its hub (plume_vr.cpp).
+  const float* MeshCentre(const GuestDrawSnapshot& snap, uint64_t mesh_key, memory::Memory* memory, bool passthrough);
+  std::unordered_map<uint64_t, std::array<float, 4>> mesh_centres_;  // w 1: read, 0: could not be
   // Draws of this frame unpacked before encoding, into pre_arena_ (kept
   // between frames so it is not reallocated every frame).
   struct PreUnpacked {

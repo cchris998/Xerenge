@@ -3817,6 +3817,68 @@ void NoteCollapsed(uint32_t bad, const GuestDrawSnapshot& snap) {
 }
 }  // namespace
 
+// VR fork: see plume_draw.h.
+const float* PlumeDrawContext::MeshCentre(const GuestDrawSnapshot& snap, uint64_t mesh_key, memory::Memory* memory,
+                                          bool passthrough) {
+  if (const auto found = mesh_centres_.find(mesh_key); found != mesh_centres_.end()) {
+    return found->second[3] == 1.f ? found->second.data() : nullptr;
+  }
+  std::array<float, 4>& centre = mesh_centres_[mesh_key];
+  centre = {0.f, 0.f, 0.f, 0.f};
+  const auto* vs_info = FindResolvedVfetch(snap.vs_hash);
+  if (!vs_info || !memory || snap.num_indices == 0 || snap.num_indices > 262144) {
+    return nullptr;
+  }
+  static const bool timed = std::getenv("XERENGE_VR_INTERPTIME") != nullptr;  // development
+  const auto start = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+  struct Timer {
+    bool on;
+    std::chrono::steady_clock::time_point start;
+    uint32_t count;
+    ~Timer() {
+      if (!on) {
+        return;
+      }
+      static uint64_t spent_ns = 0, meshes = 0, largest_ns = 0;
+      static auto window = std::chrono::steady_clock::now();
+      const auto now = std::chrono::steady_clock::now();
+      const uint64_t ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(now - start).count());
+      spent_ns += ns;
+      largest_ns = std::max(largest_ns, ns);
+      ++meshes;
+      if (now - window > std::chrono::seconds(5)) {
+        REXLOG_INFO("VR mesh centres: {} meshes in {:.2f} ms (largest {:.2f} ms)", meshes, spent_ns / 1e6, largest_ns / 1e6);
+        spent_ns = meshes = largest_ns = 0;
+        window = now;
+      }
+    }
+  } timer{timed, start, snap.num_indices};
+  const bool own = !passthrough;
+  std::vector<float> staged(size_t(snap.num_indices) * kFloatsPerVert);
+  std::vector<uint32_t> lo, hi;
+  uint32_t fetched = 0, fetch_addr = 0, fetch_type = 0;
+  const uint32_t pos_float = own ? vs_info->real_pos_float : vs_info->passthrough_pos_float;
+  UnpackVertices(snap, own ? vs_info->real_attrs : vs_info->passthrough_attrs,
+                 own ? vs_info->real_pos_fetch_const : vs_info->passthrough_pos_fetch_const, pos_float,
+                 snap.num_indices, memory, staged.data(), lo, hi, fetched, fetch_addr, fetch_type);
+  float low[3] = {1e30f, 1e30f, 1e30f}, high[3] = {-1e30f, -1e30f, -1e30f};
+  for (uint32_t v = 0; v < snap.num_indices; ++v) {
+    const float* p = staged.data() + size_t(v) * kFloatsPerVert + pos_float;
+    for (int k = 0; k < 3; ++k) {
+      low[k] = std::min(low[k], p[k]);
+      high[k] = std::max(high[k], p[k]);
+    }
+  }
+  for (int k = 0; k < 3; ++k) {
+    centre[k] = 0.5f * (low[k] + high[k]);
+    if (!(high[k] >= low[k]) || !(std::fabs(centre[k]) < 1e4f)) {
+      return nullptr;
+    }
+  }
+  centre[3] = 1.f;
+  return centre.data();
+}
+
 // The vertices of one draw, fetched and unpacked from the title's buffers into
 // `staged` (vertex_count vertices, zeroed beforehand). Touches nothing shared,
 // so the frame's draws can be unpacked on the worker threads at once. When
@@ -8232,13 +8294,34 @@ void PlumeDrawContext::EncodeDraws(plume::RenderCommandList* list,
     const bool turn_view =  // VR fork: drawn in the game's view space (plume_vr.cpp)
         vr::ViewSpaceDraw(reinterpret_cast<const float*>(snap.vs_constants.data()));
     float between_steps[16];  // VR fork: moved to the frame's moment between logic steps (plume_vr.cpp)
+    // The mesh by its shaders, size and primitive, not its buffers: deforming parts (a damaged car's panels) come from
+    // new vertex memory each frame and never found themselves the step before - drawn at the newer state against the
+    // rest of the car between the two, they wobbled (Matt 2026-10-31). Draws of one key are paired by place
+    // (plume_vr.cpp).
+    const uint64_t mesh_key =
+        (snap.vs_hash * 0x9E3779B97F4A7C15ull ^ snap.ps_hash) * 31 + (uint64_t(snap.prim_type) << 32 | snap.num_indices);
+    const bool depth_tested = DepthStateFromGuest(snap.depth_control).enabled;
+    static const bool time_interpolation = std::getenv("XERENGE_VR_INTERPTIME") != nullptr;  // development
+    const auto interpolation_start = time_interpolation ? std::chrono::steady_clock::now()
+                                                        : std::chrono::steady_clock::time_point{};
     const bool interpolate = vr::InterpolateDraw(
-        snap.vs_hash,
-        (snap.vs_hash * 0x9E3779B97F4A7C15ull ^ snap.ps_hash) * 31 +
-            ((uint64_t(snap.d3d_vertex_buffer) << 32 | snap.d3d_index_buffer) * 131 +
-             (uint64_t(snap.d3d_start_index) << 32 | snap.num_indices)),
-        DepthStateFromGuest(snap.depth_control).enabled, snap.d3d_target_width,
-        reinterpret_cast<const float*>(snap.vs_constants.data()), between_steps);
+        snap.vs_hash, mesh_key, depth_tested, snap.d3d_target_width,
+        reinterpret_cast<const float*>(snap.vs_constants.data()),
+        vr::Stereo() && depth_tested ? MeshCentre(snap, mesh_key, memory, passthrough) : nullptr, between_steps);
+    if (time_interpolation) {
+      static uint64_t spent_ns = 0, calls = 0;
+      static auto window = std::chrono::steady_clock::now();
+      const auto now = std::chrono::steady_clock::now();
+      spent_ns += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(now - interpolation_start).count());
+      ++calls;
+      if (now - window > std::chrono::seconds(5)) {
+        const double seconds = std::chrono::duration<double>(now - window).count();
+        REXLOG_INFO("VR interpolation time: {:.2f} ms a second over {} draws a second", spent_ns / 1e6 / seconds,
+                    uint64_t(calls / seconds));
+        spent_ns = calls = 0;
+        window = now;
+      }
+    }
     if (!turn_view && !interpolate && !vr_marker && last_vs && last_vs == snap.vs_constants.data()) {
       vs_slot = last_vs_slot;
     } else {

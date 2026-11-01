@@ -77,9 +77,10 @@ void TurnViewSpaceDraw(float* vs_constants);
 // camera to the frame's moment and names the frame's state and t, vr::SetFrameInterpolation): each moving draw of the
 // scene goes from where it was at the state before to where it is, as the SDK's xenos path does
 // (command_processor.cpp). Its world is its WVP (c0-c3) over the frame's camera, the WVP of MCLA_VR_CAMERA_VS's draws.
-// True with the draw's c0-c3 to use in `wvp_out`. Every depth-tested draw of the camera's target is recorded.
+// `centre`: the mesh's centre in its own space (null: its origin), where it is placed from. True with the draw's c0-c3
+// to use in `wvp_out`. Every depth-tested draw of the camera's target is recorded.
 bool InterpolateDraw(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uint32_t target_width,
-                     const float* vs_constants, float* wvp_out);
+                     const float* vs_constants, const float* centre, float* wvp_out);
 
 // Development (VR): the trigger files %TEMP%\xerenge_vr\DRAWLOG (log the next frame's draws: shaders, blend, write
 // mask, primitive and count, and whether in the HUD) and SKIP (a list of shader hashes, hex: their draws are left out

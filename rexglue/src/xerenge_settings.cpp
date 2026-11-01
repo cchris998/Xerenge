@@ -23,6 +23,7 @@
 REXCVAR_DECLARE(std::string, game_data_root);
 REXCVAR_DECLARE(std::string, lobby_server);
 REXCVAR_DECLARE(std::string, gamertag);
+REXCVAR_DECLARE(bool, vr);
 
 void XerengeSetMenuAntiAliasing(int32_t mode);
 void XerengeSetMenuSharpening(float strength);
@@ -365,6 +366,11 @@ std::vector<Row> Rows(Page page) {
   }
   for (const Setting& s : Settings()) {
     if (s.page != page || (g_single_language && s.key && std::string(s.key) == "language" && mods::Localizations().empty())) {
+      continue;
+    }
+    // In VR the eyes' size is VR EYE SIZE: KEEP 16:9 and RENDER RESOLUTION are the window's (Matt 2026-11-01: "when
+    // running vr, remove keep 16:9 and render resolution from the options").
+    if (REXCVAR_GET(vr) && (s.id == 10 || s.id == 11)) {
       continue;
     }
     Row row{s.label, {}, s.id};

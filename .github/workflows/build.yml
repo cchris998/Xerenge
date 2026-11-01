@@ -93,9 +93,9 @@ jobs:
       - name: Resolve SDK/plume/XenosRecomp commits
         id: pins
         run: |
-          echo "sdk=$(git ls-remote https://github.com/shipa-2/rexglue-xerenge.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
-          echo "plume=$(git ls-remote https://github.com/shipa-2/plume-xerenge.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
-          echo "xenos=$(git ls-remote https://github.com/shipa-2/XenosRecomp-xerenge.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
+          echo "sdk=$(git ls-remote https://github.com/hookmanuk/rexglue-xerenge.git refs/heads/vr | cut -f1)" >> "$GITHUB_OUTPUT"
+          echo "plume=$(git ls-remote https://github.com/hookmanuk/plume-xerenge.git refs/heads/vr | cut -f1)" >> "$GITHUB_OUTPUT"
+          echo "xenos=$(git ls-remote https://github.com/hookmanuk/XenosRecomp-xerenge.git refs/heads/vr | cut -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Cache the SDK checkout and build
         uses: actions/cache@v4
@@ -235,9 +235,9 @@ jobs:
       - name: Resolve SDK/plume/XenosRecomp commits
         id: pins
         run: |
-          echo "sdk=$(git ls-remote https://github.com/shipa-2/rexglue-xerenge.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
-          echo "plume=$(git ls-remote https://github.com/shipa-2/plume-xerenge.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
-          echo "xenos=$(git ls-remote https://github.com/shipa-2/XenosRecomp-xerenge.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
+          echo "sdk=$(git ls-remote https://github.com/hookmanuk/rexglue-xerenge.git refs/heads/vr | cut -f1)" >> "$GITHUB_OUTPUT"
+          echo "plume=$(git ls-remote https://github.com/hookmanuk/plume-xerenge.git refs/heads/vr | cut -f1)" >> "$GITHUB_OUTPUT"
+          echo "xenos=$(git ls-remote https://github.com/hookmanuk/XenosRecomp-xerenge.git refs/heads/vr | cut -f1)" >> "$GITHUB_OUTPUT"
           # The runner image: a new one brings a new MSVC, and the precompiled headers of a build made with the old one no longer load.
           echo "image=${ImageVersion:-none}" >> "$GITHUB_OUTPUT"
 
@@ -391,9 +391,9 @@ jobs:
       - name: Resolve SDK/plume/XenosRecomp commits
         id: pins
         run: |
-          echo "sdk=$(git ls-remote https://github.com/shipa-2/rexglue-xerenge.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
-          echo "plume=$(git ls-remote https://github.com/shipa-2/plume-xerenge.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
-          echo "xenos=$(git ls-remote https://github.com/shipa-2/XenosRecomp-xerenge.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
+          echo "sdk=$(git ls-remote https://github.com/hookmanuk/rexglue-xerenge.git refs/heads/vr | cut -f1)" >> "$GITHUB_OUTPUT"
+          echo "plume=$(git ls-remote https://github.com/hookmanuk/plume-xerenge.git refs/heads/vr | cut -f1)" >> "$GITHUB_OUTPUT"
+          echo "xenos=$(git ls-remote https://github.com/hookmanuk/XenosRecomp-xerenge.git refs/heads/vr | cut -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Cache the SDK checkout and build
         uses: actions/cache@v4
@@ -519,9 +519,9 @@ jobs:
       - name: Resolve SDK/plume/XenosRecomp commits
         id: pins
         run: |
-          echo "sdk=$(git ls-remote https://github.com/shipa-2/rexglue-xerenge.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
-          echo "plume=$(git ls-remote https://github.com/shipa-2/plume-xerenge.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
-          echo "xenos=$(git ls-remote https://github.com/shipa-2/XenosRecomp-xerenge.git HEAD | cut -f1)" >> "$GITHUB_OUTPUT"
+          echo "sdk=$(git ls-remote https://github.com/hookmanuk/rexglue-xerenge.git refs/heads/vr | cut -f1)" >> "$GITHUB_OUTPUT"
+          echo "plume=$(git ls-remote https://github.com/hookmanuk/plume-xerenge.git refs/heads/vr | cut -f1)" >> "$GITHUB_OUTPUT"
+          echo "xenos=$(git ls-remote https://github.com/hookmanuk/XenosRecomp-xerenge.git refs/heads/vr | cut -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Cache the SDK checkout and build
         uses: actions/cache@v4

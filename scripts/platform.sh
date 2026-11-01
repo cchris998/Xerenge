@@ -50,3 +50,13 @@ retry() {
         n=$((n + 1))
     done
 }
+
+# The dependencies' VR work (the SDK, plume, XenosRecomp) is on the vr branch of
+# hookmanuk's forks of them, which the setup scripts fetch. A checkout that has a
+# branch vr of its own is where that work is made: it is not reset.
+#   vr_working_copy <repo>
+vr_working_copy() {
+    git -C "$1" show-ref --verify --quiet refs/heads/vr &&
+        [ "$(git -C "$1" rev-parse --abbrev-ref HEAD)" = vr ] &&
+        [ -n "$(git -C "$1" remote -v | grep -v hookmanuk)" ]
+}

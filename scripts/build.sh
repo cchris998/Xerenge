@@ -101,6 +101,18 @@ if [ ! -s "$project/generated/shader_cache_runtime.cpp" ]; then
         ./tools/translate_runtime_shaders.sh --from-disc)
 fi
 
+# VR: the multiview variants of both caches (XenosRecomp with shader_common_stereo.h; plume links them when they
+# are there), made again whenever the flat ones are newer.
+for cache in shader_cache_stereo.cpp shader_cache_runtime_stereo.cpp; do
+    if [ ! -s "$project/generated/$cache" ] || [ "$project/generated/shader_cache.cpp" -nt "$project/generated/$cache" ] ||
+       [ "$project/generated/shader_cache_runtime.cpp" -nt "$project/generated/$cache" ]; then
+        echo "== translating the shaders for VR (stereo)"
+        (cd "$project" && XENOSRECOMP="$root/XenosRecomp/build/XenosRecomp/XenosRecomp$XR_EXE" \
+            ./tools/rebuild_plume_stereo_shaders.sh)
+        break
+    fi
+done
+
 if [ -n "$generate_only" ]; then
     echo "== generated: $project/generated"
     exit 0
@@ -132,10 +144,31 @@ cmake -S "$project" -B "$project/build" $generator \
       -DREXSDK_DIR="$sdk" \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
-      -DCMAKE_C_FLAGS=$march -DCMAKE_CXX_FLAGS=$march
+      -DCMAKE_C_FLAGS=$march -DCMAKE_CXX_FLAGS=$march \
+      -DREXGLUE_USE_VULKAN=ON
 
 echo "== building"
 cmake --build "$project/build" -j"$XR_JOBS"
+
+# VR on Windows: the OpenXR loader beside the game (the SDK loads openxr_loader.dll from there), from the Khronos
+# Group's release of it, checked against its checksum.
+if [ "$XR_OS" = windows ] && [ ! -f "$project/build/openxr_loader.dll" ]; then
+    echo "== fetching the OpenXR loader"
+    oxr_version=1.1.63
+    oxr_sha256=01c631aeabbfe0879540f77ef833416c532a20746285b494630160c23588b771
+    oxr_zip="$project/build/openxr_loader_windows-$oxr_version.zip"
+    retry curl -sSfL -o "$oxr_zip" \
+        "https://github.com/KhronosGroup/OpenXR-SDK-Source/releases/download/release-$oxr_version/openxr_loader_windows-$oxr_version.zip"
+    if [ "$(sha256sum "$oxr_zip" | cut -d' ' -f1)" != "$oxr_sha256" ]; then
+        echo "the OpenXR loader download does not match its checksum" >&2
+        exit 1
+    fi
+    powershell -NoProfile -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; \
+        \$z = [IO.Compression.ZipFile]::OpenRead('$(cygpath -w "$oxr_zip")'); \
+        \$e = \$z.Entries | Where-Object FullName -eq 'x64/bin/openxr_loader.dll'; \
+        [IO.Compression.ZipFileExtensions]::ExtractToFile(\$e, '$(cygpath -w "$project/build/openxr_loader.dll")', \$true); \$z.Dispose()"
+    rm -f "$oxr_zip"
+fi
 
 echo
 echo "done: $project/build/burnout$XR_EXE"

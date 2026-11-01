@@ -13,27 +13,34 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/scripts/platform.sh"
 plume="$root/plume"
 xenos="$root/XenosRecomp"
-plume_remote=${XERENGE_PLUME_REMOTE:-https://github.com/shipa-2/plume-xerenge.git}
-xenos_remote=${XERENGE_XENOSRECOMP_REMOTE:-https://github.com/shipa-2/XenosRecomp-xerenge.git}
+# The VR forks (hookmanuk's forks of Xerenge's, their vr branches: multiview, the stereo shaders).
+plume_remote=${XERENGE_PLUME_REMOTE:-https://github.com/hookmanuk/plume-xerenge.git}
+xenos_remote=${XERENGE_XENOSRECOMP_REMOTE:-https://github.com/hookmanuk/XenosRecomp-xerenge.git}
+plume_branch=${XERENGE_PLUME_BRANCH:-vr}
+xenos_branch=${XERENGE_XENOSRECOMP_BRANCH:-vr}
 
 if [ ! -d "$plume/.git" ]; then
     echo "== fetching plume into $plume"
-    git clone --depth 1 "$plume_remote" "$plume"
+    git clone --depth 1 -b "$plume_branch" "$plume_remote" "$plume"
+elif vr_working_copy "$plume"; then
+    echo "== plume is a VR working copy (branch vr, another remote): left as it is"
 else
     echo "== plume is already there: $plume; updating"
-    git -C "$plume" fetch --depth 1 origin
-    git -C "$plume" reset --hard origin/HEAD
+    git -C "$plume" fetch --depth 1 origin "$plume_branch"
+    git -C "$plume" checkout -q -f -B "$plume_branch" FETCH_HEAD
 fi
 echo "== plume submodules"
 retry git -C "$plume" submodule update --init --recursive --depth 1
 
 if [ ! -d "$xenos/.git" ]; then
     echo "== fetching XenosRecomp into $xenos"
-    git clone "$xenos_remote" "$xenos"
+    git clone -b "$xenos_branch" "$xenos_remote" "$xenos"
+elif vr_working_copy "$xenos"; then
+    echo "== XenosRecomp is a VR working copy (branch vr, another remote): left as it is"
 else
     echo "== XenosRecomp is already there: $xenos; updating"
-    git -C "$xenos" fetch origin
-    git -C "$xenos" reset --hard origin/HEAD
+    git -C "$xenos" fetch origin "$xenos_branch"
+    git -C "$xenos" checkout -q -f -B "$xenos_branch" FETCH_HEAD
 fi
 echo "== XenosRecomp submodules"
 retry git -C "$xenos" submodule update --init --recursive --depth 1

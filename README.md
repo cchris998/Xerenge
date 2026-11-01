@@ -28,6 +28,22 @@ markers at their cars' depth all work in races, menus and replays.
   RESOLUTION, ANTI-ALIASING) do not apply in VR and are hidden there.
 - **Disc:** this release carries the game built for the European disc only.
 
+**Building the VR version.** The VR support also needs the `vr` branch of
+three forked dependencies, which `scripts/setup-sdk.sh` and
+`scripts/setup-deps.sh` fetch on their own:
+
+| Dependency | Fork and branch | What the VR branch adds |
+| --- | --- | --- |
+| SDK | [hookmanuk/rexglue-xerenge](https://github.com/hookmanuk/rexglue-xerenge/tree/vr), `vr` | the OpenXR layer: head tracking, multiview stereo, frame pacing, per-eye sharpening, recentring, drawing between logic steps |
+| plume | [hookmanuk/plume-xerenge](https://github.com/hookmanuk/plume-xerenge/tree/vr), `vr` | multiview (both eyes in one pass), the hooks that share plume's Vulkan device with OpenXR |
+| XenosRecomp | [hookmanuk/XenosRecomp-xerenge](https://github.com/hookmanuk/XenosRecomp-xerenge/tree/vr), `vr` | the stereo shader variants, the bloom strength in the composite |
+
+They are forks of the dependencies upstream Xerenge uses (shipa-2's), so the
+SDK, plume and XenosRecomp changes can be shared by other VR ports. The SDK is
+built with Vulkan on (`-DREXGLUE_USE_VULKAN=ON`), and `scripts/build.sh` also
+makes the stereo shader caches and, on Windows, puts the Khronos OpenXR loader
+(`openxr_loader.dll`, 1.1.63) beside the game.
+
 ## Getting it running
 
 You need a dump of the retail European or American release - the image

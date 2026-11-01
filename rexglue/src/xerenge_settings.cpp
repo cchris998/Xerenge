@@ -155,7 +155,7 @@ std::string g_mod_english;
 // The bloom's strength xerenge.conf starts the game with: 0 off, 1 light, 2 medium, 3 full.
 int BloomLevelAtStart() {
   const std::string value = ConfValue("bloom", "false");
-  return value.rfind("true", 0) == 0 ? 3 : value == "0.5" ? 2 : value == "0.25" ? 1 : 0;
+  return value.rfind("true", 0) == 0 ? 3 : value == "0.75" ? 2 : value == "0.5" ? 1 : 0;
 }
 
 const std::vector<Setting>& Settings() {
@@ -232,10 +232,11 @@ const std::vector<Setting>& Settings() {
     // Bloom and blur at once as far as the game's passes go (render_patches.cpp,
     // plume's pipelines); the blur's motion vectors, which plume draws only when
     // it starts with the blur on, then follow at the next start.
-    // A strength (Matt 2026-11-01: "make the bloom toggle a strength instead like shake is"): plume blends the
-    // in-place term with 0, 0.25 or 0.5 of the blurred bloom, or takes the game's own; false and true as before.
+    // A strength (Matt 2026-11-01: "make the bloom toggle a strength instead like shake is"; "light = 0.5, medium =
+    // 0.75"): plume blends the in-place term with 0, 0.5 or 0.75 of the blurred bloom, or takes the game's own; false
+    // and true as before.
     Setting bloom{15, kGraphics, "BLOOM", "bloom",
-                  {{"OFF", "false"}, {"LIGHT", "0.25"}, {"MEDIUM", "0.5"}, {"FULL", "true"}}, 0};
+                  {{"OFF", "false"}, {"LIGHT", "0.5"}, {"MEDIUM", "0.75"}, {"FULL", "true"}}, 0};
     bloom.restart = false;
     bloom.live = [](int option) { XerengeSetMenuBloom(option); };
     bloom.running = [] { return BloomLevelAtStart(); };

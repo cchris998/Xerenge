@@ -152,10 +152,22 @@ bool g_restart = false;
 // empty when the game did not start under a mod.
 std::string g_mod_english;
 
-// The bloom's strength xerenge.conf starts the game with: 0 off, 1 light, 2 medium, 3 full.
-int BloomLevelAtStart() {
-  const std::string value = ConfValue("bloom", "false");
+// The bloom's strength xerenge.conf starts the game with: 0 off, 1 light, 2 medium, 3 full. In VR its own, vr_bloom;
+// without one, the installer's bloom on is Light there (Matt 2026-11-01: "make sure that the bloom defaults to light
+// in vr, when ticked in the installer"), off is off.
+int BloomLevel(const std::string& value) {
   return value.rfind("true", 0) == 0 ? 3 : value == "0.75" ? 2 : value == "0.5" ? 1 : 0;
+}
+
+int BloomLevelAtStart() {
+  if (REXCVAR_GET(vr)) {
+    if (const std::string vr_bloom = ConfValue("vr_bloom", ""); !vr_bloom.empty()) {
+      return BloomLevel(vr_bloom);
+    }
+    const std::string bloom = ConfValue("bloom", "false");
+    return bloom.rfind("true", 0) == 0 ? 1 : BloomLevel(bloom);
+  }
+  return BloomLevel(ConfValue("bloom", "false"));
 }
 
 const std::vector<Setting>& Settings() {
@@ -240,6 +252,10 @@ const std::vector<Setting>& Settings() {
     bloom.restart = false;
     bloom.live = [](int option) { XerengeSetMenuBloom(option); };
     bloom.running = [] { return BloomLevelAtStart(); };
+    bloom.set = [](int option) {  // in VR its own key (BloomLevelAtStart)
+      static const char* kValues[] = {"false", "0.5", "0.75", "true"};
+      WriteConf(REXCVAR_GET(vr) ? "vr_bloom" : "bloom", kValues[option]);
+    };
     s.push_back(bloom);
     Setting blur{16, kGraphics, "BLUR", "motion_blur", OffOn(), 0};
     blur.restart = false;

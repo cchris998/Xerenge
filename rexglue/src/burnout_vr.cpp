@@ -112,10 +112,11 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
     return;
   }
   rex::cvar::SetFlagByName("vr", "true");
-  // Start recentres the view on the head (Matt 2026-10-31: "We need to recentre the headset when pressing start"): the
-  // pause menu and the menus' Start, as F8 does. 0x0010 is X_INPUT_GAMEPAD_START.
+  // Back recentres the view on the head, anywhere, as F8 does (Matt 2026-10-31: "We need to recentre the headset when
+  // pressing start"; 2026-11-01: "change the recentre button from start to back"). The press still reaches the game.
+  // 0x0020 is X_INPUT_GAMEPAD_BACK.
   rex::input::SetButtonPressedHook([](uint16_t button) {
-    if (button == 0x0010) {
+    if (button == 0x0020) {
       vr::Recenter();
     }
   });

@@ -58,25 +58,36 @@ namespace {
 // The seat: an offset added to the head's place in the headset's space (x right, y up, z back), moved with the arrow
 // keys (left/right, up/down) and Ctrl+Up/Down (forward/back) while the game's window has the focus, kept in
 // xerenge.conf as vr_offset "x y z" metres (Matt 2026-11-01: "arrow keys for moving the camera, and ctrl+up or down
-// for the depth"). Added to the pose wherever it is taken (the game's camera, plume's view-space draws, the headset).
+// for the depth"). Added to the game's camera only (PoseRwMatrix) and, through XERENGE_VR_SEAT in the process's
+// environment, to plume's view-space draws: not to the pose the headset is told the frame was drawn from - SteamVR
+// reprojected each frame back to the real head, the image warped and the car came no closer (Matt 2026-11-01).
 std::atomic<float> g_seat[3] = {0.f, 0.f, 0.f};
+// Metres a second and the farthest each way: forward and back faster and farther, to reach into the car from the chase
+// camera, 5-6 m behind it (Matt 2026-11-01: "it should move the camera forwards into the car").
+constexpr float kSeatSpeed[3] = {0.25f, 0.25f, 1.f};
+constexpr float kSeatRange[3] = {2.f, 2.f, 8.f};
+
+void PublishSeat();
 
 void LoadSeat() {
   float x = 0.f, y = 0.f, z = 0.f;
   if (std::sscanf(xerenge::settings::ConfString("vr_offset", "0 0 0").c_str(), "%f %f %f", &x, &y, &z) == 3) {
-    g_seat[0] = std::clamp(x, -2.f, 2.f);
-    g_seat[1] = std::clamp(y, -2.f, 2.f);
-    g_seat[2] = std::clamp(z, -2.f, 2.f);
+    g_seat[0] = std::clamp(x, -kSeatRange[0], kSeatRange[0]);
+    g_seat[1] = std::clamp(y, -kSeatRange[1], kSeatRange[1]);
+    g_seat[2] = std::clamp(z, -kSeatRange[2], kSeatRange[2]);
   }
+  PublishSeat();
 }
 
-void ApplySeat(float* pose) {
-  pose[12] += g_seat[0].load(std::memory_order_relaxed);
-  pose[13] += g_seat[1].load(std::memory_order_relaxed);
-  pose[14] += g_seat[2].load(std::memory_order_relaxed);
+// The seat for plume (plume_vr.cpp TurnViewSpaceDraw): the process's environment, which both modules see.
+void PublishSeat() {
+#ifdef _WIN32
+  SetEnvironmentVariableA("XERENGE_VR_SEAT", fmt::format("{:.4f} {:.4f} {:.4f}", g_seat[0].load(), g_seat[1].load(),
+                                                         g_seat[2].load()).c_str());
+#endif
 }
 
-// Once a game frame: the keys held move the seat at 25 cm a second; let go, it is saved.
+// Once a game frame: the keys held move the seat (kSeatSpeed); let go, it is saved.
 void MoveSeat() {
 #ifdef _WIN32
   static auto last = std::chrono::steady_clock::now();
@@ -96,7 +107,10 @@ void MoveSeat() {
   }
   const bool any = move[0] != 0.f || move[1] != 0.f || move[2] != 0.f;
   for (int k = 0; k < 3 && any; ++k) {
-    g_seat[k] = std::clamp(g_seat[k].load() + move[k] * 0.25f * dt, -2.f, 2.f);
+    g_seat[k] = std::clamp(g_seat[k].load() + move[k] * kSeatSpeed[k] * dt, -kSeatRange[k], kSeatRange[k]);
+  }
+  if (any) {
+    PublishSeat();
   }
   if (moving && !any) {
     xerenge::settings::SetConfString(
@@ -515,7 +529,9 @@ void PoseRwMatrix(uint8_t* base, uint32_t m, const float (&pose)[16]) {
   }
   for (int c = 0; c < 3; ++c) {
     StoreFloat(base, m + 48 + 4 * c,
-               rows[3][c] + pose[12] * seat[0][c] + pose[13] * seat[1][c] + pose[14] * seat[2][c]);
+               rows[3][c] + (pose[12] + g_seat[0].load(std::memory_order_relaxed)) * seat[0][c] +
+                   (pose[13] + g_seat[1].load(std::memory_order_relaxed)) * seat[1][c] +
+                   (pose[14] + g_seat[2].load(std::memory_order_relaxed)) * seat[2][c]);
   }
 }
 
@@ -703,7 +719,6 @@ REX_HOOK_RAW(sub_820FBE60) {
       // The pose this frame is built with; the view window (next) takes the headset's field of view.
       t_posed = vr::HeadPose(t_pose, t_tangents);
       if (t_posed) {
-        ApplySeat(t_pose);
         const float h = std::max(-t_tangents[0], t_tangents[1]), v = std::max(t_tangents[2], -t_tangents[3]);
         t_tangents[0] = -h;
         t_tangents[1] = h;
@@ -737,9 +752,6 @@ REX_HOOK_RAW(sub_820FBE60) {
         pose_frame = vr::GameSwapCount();
         float tangents[4];
         frame_posed = vr::HeadPoseNow(frame_pose, tangents);
-        if (frame_posed) {
-          ApplySeat(frame_pose);
-        }
       }
       if (frame_posed) {
         std::memcpy(pose, frame_pose, sizeof(pose));

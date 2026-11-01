@@ -22,6 +22,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -32,6 +33,12 @@
 #include <vector>
 
 #include <plume_vulkan.h>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>  // GetEnvironmentVariableA (the seat offset)
+#endif
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
@@ -243,6 +250,19 @@ bool ViewSpaceDraw(const float* c) {
          zero(c[9]) && zero(c[12]) && zero(c[13]) && std::fabs(c[14] - 1.f) < 1e-4f && zero(c[15]);
 }
 
+// The seat offset (burnout_vr.cpp: the arrow keys), in the headset's space like the pose's translation: the game's
+// camera is moved by it, so the view-space draws are too. Read once a frame (BeginFrame).
+float g_seat_offset[3] = {0.f, 0.f, 0.f};
+
+void ReadSeatOffset() {
+#ifdef _WIN32
+  char text[96] = {};
+  if (GetEnvironmentVariableA("XERENGE_VR_SEAT", text, sizeof(text)) > 0) {
+    std::sscanf(text, "%f %f %f", &g_seat_offset[0], &g_seat_offset[1], &g_seat_offset[2]);
+  }
+#endif
+}
+
 void TurnViewSpaceDraw(float* c) {
   // The renderer's camera rows are turned as row'_r = s_r sum_k pose[r][k] s_k row_k and its position moved by
   // sum_k pose[3][k] s_k row_k (burnout_vr.cpp PoseRwMatrix). A point in the game's view space (axes sigma_i row_i)
@@ -257,7 +277,8 @@ void TurnViewSpaceDraw(float* c) {
     for (int j = 0; j < 3; ++j) {
       a[i][j] = sigma[i] * sigma[j] * s[i] * s[j] * pose[i * 4 + j];
     }
-    t[i] = -sigma[i] * s[i] * (pose[12] * pose[i * 4] + pose[13] * pose[i * 4 + 1] + pose[14] * pose[i * 4 + 2]);
+    const float px = pose[12] + g_seat_offset[0], py = pose[13] + g_seat_offset[1], pz = pose[14] + g_seat_offset[2];
+    t[i] = -sigma[i] * s[i] * (px * pose[i * 4] + py * pose[i * 4 + 1] + pz * pose[i * 4 + 2]);
   }
   for (int row = 0; row < 4; ++row) {
     float* r = c + row * 4;
@@ -1209,6 +1230,7 @@ void BeginFrame() {
   if (!g_active) {
     return;
   }
+  ReadSeatOffset();
   g_frame = {};
   g_split = false;
   g_marker_run = true;

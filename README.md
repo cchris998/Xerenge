@@ -20,8 +20,9 @@ markers at their cars' depth all work in races, menus and replays.
   the normal one. Start your headset's OpenXR runtime (SteamVR) first.
 - **Recentring:** press **Back** on the pad (or F8) to recentre the view.
 - **Seat position:** the arrow keys move the view left, right, up and down,
-  and **Ctrl+Up/Down** forward and back (25 cm a second, while the game's
-  window has the focus). It is kept in xerenge.conf as `vr_offset`.
+  and **Ctrl+Up/Down** forward and back, up to 8 m (into the car from the
+  chase camera; 1 m a second forward and back, 25 cm a second the others,
+  while the game's window has the focus). It is kept in xerenge.conf as `vr_offset`.
 - **Settings:** changing the resolution and the other VR options is done in
   the game, under **Driver Details > Graphics**: VR EYE SIZE (the per-eye
   resolution, 2560x2160 by default, up to 7680x5760), VR FRAME CAP and

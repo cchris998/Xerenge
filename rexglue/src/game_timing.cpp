@@ -385,6 +385,7 @@ void XerengeSetMenuSharpening(float strength) {
   g_clock.menu_sharpening = strength;
 }
 
-void XerengeSetMenuBloomFlag(bool on) {
-  g_clock.menu_bloom = on ? 1 : 0;
+// The bloom's strength for plume: 0 off, 1 light, 2 medium, 3 full.
+void XerengeSetMenuBloomFlag(int32_t level) {
+  g_clock.menu_bloom = level;
 }

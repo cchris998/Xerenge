@@ -28,22 +28,31 @@ std::atomic<bool>& SkyBloomSkipped() {
   return skipped;
 }
 
+// Under plume (XERENGE_D3D_TARGETS, set for it by the launcher and the VR start) the bloom's setup always runs: plume's
+// composite takes the strength (off to full), and its setup runs only as a race or a menu loads - skipped at the start,
+// bloom turned on later added a bloom never made, and darkened the picture (Matt 2026-11-01: "If I turn bloom on in
+// game then it doesnt function properly, it just makes the game darker"). Under xenos off is still the setup skipped.
+bool PlumeComposite() {
+  static const bool plume = std::getenv("XERENGE_D3D_TARGETS") != nullptr;
+  return plume;
+}
+
 std::atomic<bool>& MotionBlurSkipped() {
   static std::atomic<bool> skipped{std::getenv("XERENGE_NO_MOTION_BLUR") != nullptr};
   return skipped;
 }
 
-bool SkipSkyBloom() { return SkyBloomSkipped().load(std::memory_order_relaxed); }
+bool SkipSkyBloom() { return !PlumeComposite() && SkyBloomSkipped().load(std::memory_order_relaxed); }
 bool SkipMotionBlur() { return MotionBlurSkipped().load(std::memory_order_relaxed); }
 }  // namespace
 
-void XerengeSetMenuBloomFlag(bool on);
+void XerengeSetMenuBloomFlag(int32_t level);
 
-// The menus' bloom and motion blur: the passes here at once, and the bloom
-// for plume's shaders through the frame clock (game_timing.cpp).
-void XerengeSetMenuBloom(bool on) {
-  SkyBloomSkipped().store(!on, std::memory_order_relaxed);
-  XerengeSetMenuBloomFlag(on);
+// The menus' bloom (0 off, 1 light, 2 medium, 3 full) and motion blur: the passes here at once, and the bloom for
+// plume's shaders through the frame clock (game_timing.cpp).
+void XerengeSetMenuBloom(int32_t level) {
+  SkyBloomSkipped().store(level == 0, std::memory_order_relaxed);
+  XerengeSetMenuBloomFlag(level);
 }
 
 void XerengeSetMenuMotionBlur(bool on) {

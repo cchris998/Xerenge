@@ -22,9 +22,9 @@ markers at their cars' depth all work in races, menus and replays.
 - **Settings:** changing the resolution and the other VR options is done in
   the game, under **Driver Details > Graphics**: VR EYE SIZE (the per-eye
   resolution, 2560x2160 by default, up to 7680x5760), VR FRAME CAP and
-  VR CAMERA SHAKE (Off, Light, Medium, Full; Light by default), plus
-  sharpening, bloom and blur. Camera shake, sharpening, bloom and blur can also
-  be changed from the race's pause menu. The window options (KEEP 16:9, RENDER
+  VR CAMERA SHAKE (Off, Light, Medium, Full; Light by default), BLOOM (Off,
+  Light, Medium, Full), sharpening and blur. Camera shake, sharpening, bloom and
+  blur can also be changed from the race's pause menu, and take effect at once. The window options (KEEP 16:9, RENDER
   RESOLUTION, ANTI-ALIASING) do not apply in VR and are hidden there.
 - **Disc:** this release carries the game built for the European disc only.
 

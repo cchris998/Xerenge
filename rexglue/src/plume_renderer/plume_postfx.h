@@ -35,10 +35,12 @@ void SetAntiAliasing(AntiAliasing mode);
 // 0 (off) to 1 (the strongest sharpening); values outside are clamped.
 float GetSharpening();
 void SetSharpening(float strength);
-// Whether the bloom is off: the shaders then take the bloom term from the pixel
-// itself (plume_draw.cpp). XERENGE_NO_BLOOM at the start, then as the game's menus
-// set it (read with the frame clock, in Settings::Current).
-bool BloomOff();
+// The bloom's strength: 0 off, 1 light, 2 medium, 3 full (the game's own). Below full the shaders take the bloom
+// term from the pixel itself, blended with 0, 0.25 or 0.5 of the blurred bloom (plume_draw.cpp, XenosRecomp's
+// SPEC_CONSTANT_BLOOM_IN_PLACE). XERENGE_NO_BLOOM at the start (off), then as the game's menus set it (read with the
+// frame clock, in Settings::Current).
+uint32_t BloomLevel();
+inline bool BloomOff() { return BloomLevel() < 3; }
 
 // The passes themselves, run by the swapchain between the scene target and
 // the copy onto the window's image.

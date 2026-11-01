@@ -3141,7 +3141,7 @@ plume::RenderPipeline* PlumeDrawContext::GetOrCreatePipeline(
   // The bloom setting picks the shaders' bloom term (bloom_in_place, below), and
   // the menus change it while the game runs: a pipeline for each.
   static const bool grey_sky_key = std::getenv("XERENGE_GREY_SKY") != nullptr;
-  const uint32_t bloom_bit = BloomOff() && !grey_sky_key ? 1u << 31 : 0u;
+  const uint32_t bloom_bit = grey_sky_key ? 0u : (BloomLevel() & 3u) << 29;  // the strength: one pipeline each
   PipelineKey key{vs_hash, ps_hash, uint32_t(topology), state, (blend_control >> 16) | (cull << 16) | bloom_bit};
   // XERENGE_PIPELINE_LOG=1: every pipeline's full guest blend state.
   static const bool pipeline_log = std::getenv("XERENGE_PIPELINE_LOG") != nullptr;
@@ -3256,9 +3256,10 @@ plume::RenderPipeline* PlumeDrawContext::GetOrCreatePipeline(
   // the composite takes its bloom term from the pixel itself, so the sky
   // keeps its blue without the glare (XenosRecomp, the texture fetch).
   static const bool grey_sky = std::getenv("XERENGE_GREY_SKY") != nullptr;
+  // Below full strength the blurred bloom's share in bits 7-8 (BloomLevel: 0 off, 1 light, 2 medium).
   const bool bloom_in_place = BloomOff() && !grey_sky;
   const plume::RenderSpecConstant spec(
-      0, (alpha_test ? (1u << 1) : 0u) | (bloom_in_place ? (1u << 6) : 0u));
+      0, (alpha_test ? (1u << 1) : 0u) | (bloom_in_place ? (1u << 6) | (BloomLevel() << 7) : 0u));
   desc.specConstants = &spec;
   desc.specConstantsCount = 1;
 

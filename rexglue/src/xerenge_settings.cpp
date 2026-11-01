@@ -27,7 +27,7 @@ REXCVAR_DECLARE(bool, vr);
 
 void XerengeSetMenuAntiAliasing(int32_t mode);
 void XerengeSetMenuSharpening(float strength);
-void XerengeSetMenuBloom(bool on);
+void XerengeSetMenuBloom(int32_t level);
 void XerengeSetMenuMotionBlur(bool on);
 void XerengeSetCameraShake(double shake);
 
@@ -152,6 +152,12 @@ bool g_restart = false;
 // empty when the game did not start under a mod.
 std::string g_mod_english;
 
+// The bloom's strength xerenge.conf starts the game with: 0 off, 1 light, 2 medium, 3 full.
+int BloomLevelAtStart() {
+  const std::string value = ConfValue("bloom", "false");
+  return value.rfind("true", 0) == 0 ? 3 : value == "0.5" ? 2 : value == "0.25" ? 1 : 0;
+}
+
 const std::vector<Setting>& Settings() {
   static const std::vector<Setting> settings = [] {
     std::vector<Setting> s;
@@ -226,10 +232,13 @@ const std::vector<Setting>& Settings() {
     // Bloom and blur at once as far as the game's passes go (render_patches.cpp,
     // plume's pipelines); the blur's motion vectors, which plume draws only when
     // it starts with the blur on, then follow at the next start.
-    Setting bloom{15, kGraphics, "BLOOM", "bloom", OffOn(), 0};
+    // A strength (Matt 2026-11-01: "make the bloom toggle a strength instead like shake is"): plume blends the
+    // in-place term with 0, 0.25 or 0.5 of the blurred bloom, or takes the game's own; false and true as before.
+    Setting bloom{15, kGraphics, "BLOOM", "bloom",
+                  {{"OFF", "false"}, {"LIGHT", "0.25"}, {"MEDIUM", "0.5"}, {"FULL", "true"}}, 0};
     bloom.restart = false;
-    bloom.live = [](int option) { XerengeSetMenuBloom(option == 1); };
-    bloom.running = [] { return std::getenv("XERENGE_NO_BLOOM") ? 0 : 1; };
+    bloom.live = [](int option) { XerengeSetMenuBloom(option); };
+    bloom.running = [] { return BloomLevelAtStart(); };
     s.push_back(bloom);
     Setting blur{16, kGraphics, "BLUR", "motion_blur", OffOn(), 0};
     blur.restart = false;
@@ -487,6 +496,8 @@ namespace xerenge::settings {
 
 void ApplyAtStart() {
   mods::PrepareAtStart();
+  // The bloom's strength for plume from the conf (the launcher knows only on and off).
+  XerengeSetMenuBloom(BloomLevelAtStart());
   // Under a localisation mod the game's language is English, whatever was
   // chosen before: what the mod has not translated reads in English. The
   // European disc's is EN-GB (0), the American's its only one (1).

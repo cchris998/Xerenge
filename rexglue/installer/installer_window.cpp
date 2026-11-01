@@ -311,6 +311,7 @@ InstallerWindow::InstallerWindow(QWidget* parent) : QWidget(parent) {
 
   // Off unless ticked.
   bloom_box_ = new QCheckBox(tr("Bloom on"));
+  bloom_box_->setChecked(true);  // VR fork: on unless chosen otherwise (the game's menu sets its strength)
   blur_box_ = new QCheckBox(tr("Blur on"));
   xenia_box_ = new QCheckBox(tr("Xenia render"));
   bloom_box_->setToolTip(tr("Sky bloom and the low-resolution gaussian blur."));

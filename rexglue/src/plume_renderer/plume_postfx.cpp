@@ -92,13 +92,13 @@ void SetAntiAliasing(AntiAliasing mode) {
                   std::memory_order_relaxed);
 }
 
-std::atomic<bool>& BloomOffFlag() {
-  static std::atomic<bool> off{std::getenv("XERENGE_NO_BLOOM") != nullptr};
-  return off;
+std::atomic<uint32_t>& BloomLevelValue() {
+  static std::atomic<uint32_t> level{std::getenv("XERENGE_NO_BLOOM") != nullptr ? 0u : 3u};
+  return level;
 }
 
-bool BloomOff() {
-  return BloomOffFlag().load(std::memory_order_relaxed);
+uint32_t BloomLevel() {
+  return BloomLevelValue().load(std::memory_order_relaxed);
 }
 
 float GetSharpening() {
@@ -137,7 +137,7 @@ PlumePostFx::Settings PlumePostFx::Settings::Current() {
       SetSharpening(taken_sharpening);
     }
     if (clock.menu_bloom >= 0) {
-      BloomOffFlag().store(clock.menu_bloom == 0, std::memory_order_relaxed);
+      BloomLevelValue().store(uint32_t(std::min(clock.menu_bloom, 3)), std::memory_order_relaxed);
     }
   }
   Settings settings;

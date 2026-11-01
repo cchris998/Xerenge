@@ -25,6 +25,7 @@ extern char** environ;
 #endif
 
 REXCVAR_DECLARE(std::string, game_data_root);
+REXCVAR_DECLARE(bool, vr);
 
 namespace {
 
@@ -48,7 +49,13 @@ void XerengeRestartGame() {
 #if defined(__ANDROID__)
   REXLOG_WARN("menu: restarting the game is not done on Android yet");
 #elif defined(_WIN32)
-  const std::filesystem::path launcher = InstallDir() / "Burnout Revenge.exe";
+  // VR fork: in the headset, the VR launcher (installer/launcher.cpp: its name adds --vr=true), else the restart
+  // came back flat (Matt 2026-11-01: "restarting from in game launches the game flat instead of vr").
+  std::filesystem::path launcher = InstallDir() / "Burnout Revenge.exe";
+  if (const auto vr_launcher = InstallDir() / "Burnout Revenge VR.exe";
+      REXCVAR_GET(vr) && std::filesystem::exists(vr_launcher)) {
+    launcher = vr_launcher;
+  }
   std::wstring command;
   if (std::filesystem::exists(launcher)) {
     command = L"\"" + launcher.wstring() + L"\"";

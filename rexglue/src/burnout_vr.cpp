@@ -556,7 +556,9 @@ void Report() {
 // run 2026-10-31: each one near 0 driving, up to 0.02 rad boosting). Each angle is scaled by camera_shake in
 // xerenge.conf from 0 (none) to 1 (the game's), 0.25 by default (Matt 2026-10-31: "a dampener option to reduce the
 // shake, say 0 - 1"; "that works perfectly, lets have 0.25 be the default"). XERENGE_VR_CAMERA_SHAKE set by hand wins.
+// GRAPHICS > VR CAMERA SHAKE (the menu's and the race's pause menu) changes it at once (XerengeSetCameraShake).
 // Development: XERENGE_VR_ROTLOG logs each angle.
+std::atomic<double> g_camera_shake{-1.0};  // below 0: not read yet
 int RaceCameraRotation(uint32_t lr) {
   switch (lr) {
     case 0x822F56F8: case 0x822F5708: return 0;
@@ -574,11 +576,17 @@ void TraceRaceCameraRotation(PPCContext& ctx, bool sine) {
   if (sine && std::getenv("XERENGE_VR_ROTLOG")) {
     REXLOG_INFO("VR race camera rotation {}: angle {:.5f}", which, ctx.f1.f64);
   }
-  static const double shake = [] {
+  double shake = g_camera_shake.load(std::memory_order_relaxed);
+  if (shake < 0.0) {
     const char* v = std::getenv("XERENGE_VR_CAMERA_SHAKE");
-    return v ? std::clamp(std::atof(v), 0.0, 1.0) : 1.0;
-  }();
+    shake = v ? std::clamp(std::atof(v), 0.0, 1.0) : 1.0;
+    g_camera_shake.store(shake, std::memory_order_relaxed);
+  }
   ctx.f1.f64 *= shake;
+}
+
+void XerengeSetCameraShake(double shake) {
+  g_camera_shake.store(std::clamp(shake, 0.0, 1.0), std::memory_order_relaxed);
 }
 
 REX_HOOK_RAW(sub_8259C328) {

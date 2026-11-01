@@ -28,6 +28,7 @@ void XerengeSetMenuAntiAliasing(int32_t mode);
 void XerengeSetMenuSharpening(float strength);
 void XerengeSetMenuBloom(bool on);
 void XerengeSetMenuMotionBlur(bool on);
+void XerengeSetCameraShake(double shake);
 
 namespace xerenge::settings {
 namespace {
@@ -189,6 +190,12 @@ const std::vector<Setting>& Settings() {
     language.restart = false;  // its set() says when one is needed
     s.push_back(language);
 
+    // VR EYE SIZE first on the page (Matt 2026-11-01); its frame cap and the camera shake below.
+    s.push_back({17, kGraphics, "VR EYE SIZE", "vr_resolution",
+                 {{"2560X2160", "2x3"}, {"2560X2880", "2x4"}, {"3840X2880", "3x4"}, {"3840X3600", "3x5"},
+                  {"3840X4320", "3x6"}, {"5120X3600", "4x5"}, {"5120X4320", "4x6"}, {"5120X5040", "4x7"},
+                  {"5120X5760", "4x8"}, {"6400X5760", "5x8"}, {"7680X5760", "6x8"}},
+                 0});
     s.push_back({10, kGraphics, "KEEP 16:9", "aspect_16_9", OffOn(), 1});
     s.push_back({11, kGraphics, "RENDER RESOLUTION", "render_resolution",
                  {{"THE WINDOW'S", ""}, {"1600X900", "1600x900"}, {"1280X720", "1280x720"},
@@ -230,12 +237,22 @@ const std::vector<Setting>& Settings() {
     s.push_back(blur);
     // VR (the vr branch, run.sh --vr): the eyes' render size and the frame cap, at the next start
     // (burnout_vr.cpp).
-    s.push_back({17, kGraphics, "VR EYE SIZE", "vr_resolution",
-                 {{"2560X2160", "2x3"}, {"2560X2880", "2x4"}, {"3840X2880", "3x4"}, {"3840X3600", "3x5"},
-                  {"3840X4320", "3x6"}, {"5120X3600", "4x5"}, {"5120X4320", "4x6"}, {"5120X5040", "4x7"},
-                  {"5120X5760", "4x8"}, {"6400X5760", "5x8"}, {"7680X5760", "6x8"}},
-                 0});
     s.push_back({18, kGraphics, "VR FRAME CAP", "vr_frame_cap", {{"OFF", "1"}, {"1/2", "2"}, {"1/3", "3"}}, 0});
+    // The race camera's shake (burnout_vr.cpp RaceCameraRotation), at once (Matt 2026-11-01: "add the shake option
+    // to the in game graphics menu, both on the menu and racing").
+    Setting shake{19, kGraphics, "VR CAMERA SHAKE", "camera_shake",
+                  {{"OFF", "0"}, {"LIGHT", "0.25"}, {"MEDIUM", "0.5"}, {"FULL", "1"}}, 1};
+    shake.restart = false;
+    shake.live = [](int option) {
+      static const double kShake[] = {0.0, 0.25, 0.5, 1.0};
+      XerengeSetCameraShake(kShake[option]);
+    };
+    shake.running = [] {
+      const std::string value = EnvValue("XERENGE_VR_CAMERA_SHAKE");
+      const double shake = value.empty() ? 0.25 : std::strtod(value.c_str(), nullptr);
+      return shake >= 0.75 ? 3 : shake >= 0.375 ? 2 : shake >= 0.125 ? 1 : 0;
+    };
+    s.push_back(shake);
 
     // The frame rates: 30 is fps_30, 120 frame_generation (for the race and
     // Crash mode alike), Crash mode's 60 crash_interpolation.
@@ -335,7 +352,7 @@ std::vector<Row> Rows(Page page) {
   std::vector<Row> rows;
   if (page == kPause) {
     // What changes without a restart, in the order the pause menu shows it.
-    for (const int id : {15, 16, 14, 13}) {
+    for (const int id : {15, 16, 14, 13, 19}) {
       if (const Setting* s = Find(id)) {
         Row row{s->label, {}, s->id};
         for (const Option& o : s->options) {

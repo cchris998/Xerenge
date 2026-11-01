@@ -349,12 +349,17 @@ std::string PageTitle(Page page) {
   }
 }
 
+// Left out in VR (Matt 2026-11-01): KEEP 16:9 and RENDER RESOLUTION are the window's, the eyes' size is VR EYE SIZE
+// ("when running vr, remove keep 16:9 and render resolution from the options"); ANTI-ALIASING is the flat picture's
+// (plume skips its FXAA and SMAA in stereo).
+bool HiddenInVr(int id) { return REXCVAR_GET(vr) && (id == 10 || id == 11 || id == 13); }
+
 std::vector<Row> Rows(Page page) {
   std::vector<Row> rows;
   if (page == kPause) {
     // What changes without a restart, in the order the pause menu shows it.
     for (const int id : {15, 16, 14, 13, 19}) {
-      if (const Setting* s = Find(id)) {
+      if (const Setting* s = Find(id); s && !HiddenInVr(id)) {
         Row row{s->label, {}, s->id};
         for (const Option& o : s->options) {
           row.options.push_back(o.label);
@@ -368,9 +373,7 @@ std::vector<Row> Rows(Page page) {
     if (s.page != page || (g_single_language && s.key && std::string(s.key) == "language" && mods::Localizations().empty())) {
       continue;
     }
-    // In VR the eyes' size is VR EYE SIZE: KEEP 16:9 and RENDER RESOLUTION are the window's (Matt 2026-11-01: "when
-    // running vr, remove keep 16:9 and render resolution from the options").
-    if (REXCVAR_GET(vr) && (s.id == 10 || s.id == 11)) {
+    if (HiddenInVr(s.id)) {
       continue;
     }
     Row row{s.label, {}, s.id};

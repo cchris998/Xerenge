@@ -120,10 +120,10 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
       vr::Recenter();
     }
   });
-  // The renderer (VR RENDERER, vr_renderer in xerenge.conf; XERENGE_VR_RENDERER wins): xenos (the SDK's VR layer on
-  // the xenos plugin's Vulkan backend, the default) or plume (its own renderer, no EDRAM emulation: plume_vr.cpp runs
-  // the same OpenXR layer on plume's device). The camera hooks below serve both.
-  std::string renderer = xerenge::settings::ConfString("vr_renderer", "xenos");
+  // The renderer (vr_renderer in xerenge.conf; XERENGE_VR_RENDERER wins): plume (its own renderer, no EDRAM emulation:
+  // plume_vr.cpp runs the OpenXR layer on plume's device; the default, the VR work is on it) or xenos (the SDK's VR
+  // layer on the xenos plugin's Vulkan backend). The camera hooks below serve both.
+  std::string renderer = xerenge::settings::ConfString("vr_renderer", "plume");
   if (const char* v = std::getenv("XERENGE_VR_RENDERER"); v && *v) {
     renderer = v;
   }

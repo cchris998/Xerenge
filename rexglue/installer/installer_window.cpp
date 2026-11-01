@@ -65,6 +65,8 @@ constexpr const char* kDesktopId = "xerenge-burnout-revenge.desktop";
 #ifdef Q_OS_WIN
 constexpr const char* kExe = ".exe";
 constexpr const char* kLauncherExe = "Burnout Revenge.exe";
+// VR fork: the launcher again under this name starts the game in the headset (launcher.cpp), with a shortcut of its own.
+constexpr const char* kVrLauncherExe = "Burnout Revenge VR.exe";
 constexpr const char* kOldLauncher = "Burnout Revenge.cmd";
 #else
 constexpr const char* kExe = "";
@@ -1276,6 +1278,12 @@ QString InstallerWindow::WriteSettings() const {
       !error.isEmpty()) {
     return error;
   }
+#ifdef Q_OS_WIN
+  if (const QString error = CopyFile(QDir(payload_dir_).filePath(kLauncherExe), install.filePath(kVrLauncherExe));
+      !error.isEmpty()) {
+    return error;
+  }
+#endif
   return {};
 }
 
@@ -1303,6 +1311,11 @@ QString InstallerWindow::CreateShortcuts() const {
     QFile::remove(shortcut);
     if (!QFile::link(launcher, shortcut)) {
       return tr("cannot create %1").arg(shortcut);
+    }
+    const QString vr_shortcut = QDir(dir).filePath("Burnout Revenge VR.lnk");
+    QFile::remove(vr_shortcut);
+    if (!QFile::link(install.filePath(kVrLauncherExe), vr_shortcut)) {
+      return tr("cannot create %1").arg(vr_shortcut);
     }
   }
   return {};

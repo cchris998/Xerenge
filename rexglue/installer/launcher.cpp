@@ -311,7 +311,15 @@ std::vector<std::string> Prepare(const std::filesystem::path& dir, const Config&
 #if defined(_WIN32)
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
   const std::filesystem::path dir = OwnDirectory();
-  const std::vector<std::string> args = Prepare(dir, ReadConfig(dir / "xerenge.conf"));
+  std::vector<std::string> args = Prepare(dir, ReadConfig(dir / "xerenge.conf"));
+  // VR fork: the same launcher named "Burnout Revenge VR.exe" (the installer's second copy and shortcut) starts the
+  // game in the headset.
+  wchar_t self[MAX_PATH] = {};
+  GetModuleFileNameW(nullptr, self, MAX_PATH);
+  const std::wstring stem = std::filesystem::path(self).stem().wstring();
+  if (stem.size() >= 3 && stem.compare(stem.size() - 3, 3, L" VR") == 0) {
+    args.push_back("--vr=true");
+  }
 
   std::wstring line;
   for (const auto& arg : args) {

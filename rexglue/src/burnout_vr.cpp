@@ -112,6 +112,11 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
     return;
   }
   rex::cvar::SetFlagByName("vr", "true");
+  // The pad while another window has the focus (SteamVR's VR View being recorded, Matt 2026-11-01: input stopped):
+  // SDL's controller events reach an unfocused window only with this; in the headset the desktop's focus means nothing.
+  if (!std::getenv("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS")) {
+    _putenv_s("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
+  }
   // Back recentres the view on the head, anywhere, as F8 does (Matt 2026-10-31: "We need to recentre the headset when
   // pressing start"; 2026-11-01: "change the recentre button from start to back"). The press still reaches the game.
   // 0x0020 is X_INPUT_GAMEPAD_BACK.

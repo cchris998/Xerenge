@@ -55,6 +55,58 @@ namespace vr = rex::ui::vulkan::vr;
 
 namespace {
 
+// The seat: an offset added to the head's place in the headset's space (x right, y up, z back), moved with the arrow
+// keys (left/right, up/down) and Ctrl+Up/Down (forward/back) while the game's window has the focus, kept in
+// xerenge.conf as vr_offset "x y z" metres (Matt 2026-11-01: "arrow keys for moving the camera, and ctrl+up or down
+// for the depth"). Added to the pose wherever it is taken (the game's camera, plume's view-space draws, the headset).
+std::atomic<float> g_seat[3] = {0.f, 0.f, 0.f};
+
+void LoadSeat() {
+  float x = 0.f, y = 0.f, z = 0.f;
+  if (std::sscanf(xerenge::settings::ConfString("vr_offset", "0 0 0").c_str(), "%f %f %f", &x, &y, &z) == 3) {
+    g_seat[0] = std::clamp(x, -2.f, 2.f);
+    g_seat[1] = std::clamp(y, -2.f, 2.f);
+    g_seat[2] = std::clamp(z, -2.f, 2.f);
+  }
+}
+
+void ApplySeat(float* pose) {
+  pose[12] += g_seat[0].load(std::memory_order_relaxed);
+  pose[13] += g_seat[1].load(std::memory_order_relaxed);
+  pose[14] += g_seat[2].load(std::memory_order_relaxed);
+}
+
+// Once a game frame: the keys held move the seat at 25 cm a second; let go, it is saved.
+void MoveSeat() {
+#ifdef _WIN32
+  static auto last = std::chrono::steady_clock::now();
+  static bool moving = false;
+  const auto now = std::chrono::steady_clock::now();
+  const float dt = std::min(std::chrono::duration<float>(now - last).count(), 0.1f);
+  last = now;
+  DWORD process = 0;
+  GetWindowThreadProcessId(GetForegroundWindow(), &process);
+  const auto held = [](int key) { return (GetAsyncKeyState(key) & 0x8000) != 0; };
+  float move[3] = {0.f, 0.f, 0.f};
+  if (process == GetCurrentProcessId()) {
+    const bool ctrl = held(VK_CONTROL);
+    move[0] = (held(VK_RIGHT) ? 1.f : 0.f) - (held(VK_LEFT) ? 1.f : 0.f);
+    const float up_down = (held(VK_UP) ? 1.f : 0.f) - (held(VK_DOWN) ? 1.f : 0.f);
+    (ctrl ? move[2] : move[1]) = ctrl ? -up_down : up_down;  // forward is -z
+  }
+  const bool any = move[0] != 0.f || move[1] != 0.f || move[2] != 0.f;
+  for (int k = 0; k < 3 && any; ++k) {
+    g_seat[k] = std::clamp(g_seat[k].load() + move[k] * 0.25f * dt, -2.f, 2.f);
+  }
+  if (moving && !any) {
+    xerenge::settings::SetConfString(
+        "vr_offset", fmt::format("{:.3f} {:.3f} {:.3f}", g_seat[0].load(), g_seat[1].load(), g_seat[2].load()));
+    REXLOG_INFO("VR: seat offset {:.3f} {:.3f} {:.3f} m", g_seat[0].load(), g_seat[1].load(), g_seat[2].load());
+  }
+  moving = any;
+#endif
+}
+
 constexpr uint32_t kViewportUpdateMatrixCaller = 0x8235A1A4;  // CGtViewport::Update's RwFrameGetMatrix call
 constexpr uint32_t kViewWindowCaller = 0x82353C14;            // sub_82353BA8's RwCameraSetViewWindow call
 
@@ -112,6 +164,7 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
     return;
   }
   rex::cvar::SetFlagByName("vr", "true");
+  LoadSeat();
   // The pad while another window has the focus (SteamVR's VR View being recorded, Matt 2026-11-01: input stopped):
   // SDL's controller events reach an unfocused window only with this; in the headset the desktop's focus means nothing.
   if (!std::getenv("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS")) {
@@ -268,6 +321,7 @@ void PaceFrame() {
     const uint64_t swaps = vr::GameSwapCount();
     if (swaps != paced_at) {
       paced_at = swaps;
+      MoveSeat();
       vr::PaceGameFrame();
     }
   }
@@ -649,6 +703,7 @@ REX_HOOK_RAW(sub_820FBE60) {
       // The pose this frame is built with; the view window (next) takes the headset's field of view.
       t_posed = vr::HeadPose(t_pose, t_tangents);
       if (t_posed) {
+        ApplySeat(t_pose);
         const float h = std::max(-t_tangents[0], t_tangents[1]), v = std::max(t_tangents[2], -t_tangents[3]);
         t_tangents[0] = -h;
         t_tangents[1] = h;
@@ -682,6 +737,9 @@ REX_HOOK_RAW(sub_820FBE60) {
         pose_frame = vr::GameSwapCount();
         float tangents[4];
         frame_posed = vr::HeadPoseNow(frame_pose, tangents);
+        if (frame_posed) {
+          ApplySeat(frame_pose);
+        }
       }
       if (frame_posed) {
         std::memcpy(pose, frame_pose, sizeof(pose));

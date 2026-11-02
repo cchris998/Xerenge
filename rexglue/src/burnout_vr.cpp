@@ -208,7 +208,18 @@ void PinCamera(uint8_t* base, uint32_t m) {
     const float d[3] = {game[3][0] - car[3][0], game[3][1] - car[3][1], game[3][2] - car[3][2]};
     const auto along = [&](const float* v, int k) { return v[0] * car[k][0] + v[1] * car[k][1] + v[2] * car[k][2]; };
     const float x = along(d, 0), y = along(d, 1), z = along(d, 2);
-    const bool chase = std::fabs(x) < 1.5f && y > 0.5f && y < 2.2f && z > -7.f && z < -3.f && along(game[2], 2) > 0.9f;
+    // The chase camera's place along the car's axes (on a slope both tilt) or along its heading, level (world up is y):
+    // in the air the car pitches and the game's camera stays level - nose down ~13 degrees put it over 2.2 m "up" in
+    // the car's axes, and the cockpit dropped out for a moment (Matt 2026-11-02: "If I boost over a jump high in the air
+    // then the cockpit view loses itself for a split second").
+    const auto chase_at = [](float cx, float cy, float cz, float look) {
+      return std::fabs(cx) < 1.5f && cy > 0.5f && cy < 2.2f && cz > -7.f && cz < -3.f && look > 0.9f;
+    };
+    bool chase = chase_at(x, y, z, along(game[2], 2));
+    if (const float fl = std::sqrt(car[2][0] * car[2][0] + car[2][2] * car[2][2]); !chase && fl > 0.3f) {
+      const float fx = car[2][0] / fl, fz = car[2][2] / fl;  // the heading, level
+      chase = chase_at(d[0] * fz - d[2] * fx, d[1], d[0] * fx + d[2] * fz, game[2][0] * fx + game[2][2] * fz);
+    }
     // The bumper camera: 0.55 m up and 1.10 m forward, looking the car's way (a crash's shot from 1.14 up, 1 m back was
     // taken for it when looser).
     const bool bumper = std::fabs(x) < 0.5f && y > 0.2f && y < 0.9f && z > 0.5f && z < 2.f && along(game[2], 2) > 0.9f;

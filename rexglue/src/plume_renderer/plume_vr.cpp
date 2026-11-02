@@ -1482,9 +1482,9 @@ bool CockpitNearDraw(uint64_t vs_hash, bool depth_tested, uint32_t target_width,
   static const bool off =  // development: XERENGE_VR_COCKPIT_NEARDRAW=0, the game's near plane for the car too
       std::getenv("XERENGE_VR_COCKPIT_NEARDRAW") && std::getenv("XERENGE_VR_COCKPIT_NEARDRAW")[0] == '0';
   // Not those drawn about the camera (their origin at the eye, clip x, y and w 0: the sky and the haze over the world -
-  // in front of it they hid the town), nor the interface's (the race markers: their constants are no matrix, and taken
-  // for the car's their placing was written over - Matt 2026-11-02: the markers gone in the cockpit view).
-  if (off || !g_cockpit_view || !Stereo() || !depth_tested || CameraVertexShader(vs_hash) || HudVertexShader(vs_hash) ||
+  // in front of it they hid the town). The interface's never come here (InterpolateDraw): taken for the car's, the race
+  // markers' placing was written over (Matt 2026-11-02: the markers gone in the cockpit view).
+  if (off || !g_cockpit_view || !Stereo() || !depth_tested || CameraVertexShader(vs_hash) ||
       std::fabs(c[12]) + std::fabs(c[13]) + std::fabs(c[14]) < 1e-6f ||
       (std::fabs(c[15]) < 1e-3f && std::fabs(c[3]) < 1e-3f && std::fabs(c[7]) < 1e-3f)) {
     return false;
@@ -1519,6 +1519,12 @@ bool CockpitNearDraw(uint64_t vs_hash, bool depth_tested, uint32_t target_width,
 
 bool InterpolateDraw(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uint32_t target_width, const float* c,
                      const float* centre, float* wvp_out) {
+  // Not the interface's (the race markers: their constants are no matrix - c12-c15 hold what the last draw left). Left
+  // out by w < 0.5 till the cockpit took only the draws at the eye; there they were moved between steps now and then
+  // and their placing written over (Matt 2026-11-02: "they are very flickery").
+  if (HudVertexShader(vs_hash)) {
+    return false;
+  }
   const bool moved = InterpolateDrawSteps(vs_hash, mesh_key, depth_tested, target_width, c, centre, wvp_out);
   return CockpitNearDraw(vs_hash, depth_tested, target_width, c, moved, wvp_out) || moved;
 }

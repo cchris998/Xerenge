@@ -288,11 +288,15 @@ struct CockpitCar {
 
 // The cockpit's steering wheel turned as the car steers (Matt 2026-11-01: "find the steering wheel model of the car, and
 // rotate it as we steer"). It is part of the car's interior model: of the meshes drawn with the car's matrix, the one
-// with a disc-shaped piece of its own (connected triangles: 0.25-0.5 m across, flat) to one side, ahead of the middle -
-// Angel Valley's car's 298 vertices of 1525. Those vertices are turned about the disc's axis (the steering column) by
-// the front wheels' steering angle (their axles against the body's, drawn the frame before) times kWheelRatio, as plume
-// unpacks them (plume_draw.cpp; the mesh kept out of the vertex cache in the cockpit).
+// with a disc-shaped piece of its own (connected triangles: 0.25-0.5 m across, flat) to one side, from 0.6 m behind the
+// car's origin to 1 m ahead (a cabin further back: 8 cm behind it in C23F78068B1CA22E) - Angel Valley's car's 298
+// vertices of 1525. Those vertices are turned about the disc's axis (the steering column) by
+// the player's steering (burnout_vr.cpp PublishSteer: the left stick; the front wheels as drawn shook against walls),
+// eased over kSteerSeconds, at most kFullLock times kWheelRatio, as plume unpacks them (plume_draw.cpp; the mesh kept
+// out of the vertex cache in the cockpit).
 constexpr float kWheelRatio = 12.f;  // the front wheels turn ~8 degrees at full lock: ~95 at the wheel
+constexpr float kFullLock = 0.1396f;  // 8 degrees: the front wheels' angle at full lock, measured at low speed
+constexpr float kSteerSeconds = 0.06f;  // the stick eased in (the time constant)
 struct SteeringWheel {
   bool found = false;
   std::vector<uint32_t> vertices;  // the wheel's, of the unpacked ones
@@ -302,78 +306,28 @@ struct CockpitSteering {
   std::mutex mutex;
   std::unordered_set<uint64_t> car_meshes;  // the car's meshes, the frame before
   std::unordered_map<uint64_t, SteeringWheel> wheels;  // by mesh: what was found in it
-  bool have_body = false;  // this frame: the body's world, the front wheels' angles
-  double body[16]{};
-  double angle_sum = 0.0;
-  int angles = 0;
-  float angle = 0.f;  // the steering angle (radians, the frame before)
+  float angle = 0.f;  // the steering angle (front wheels' radians, left negative)
+  std::chrono::steady_clock::time_point eased{};  // when it was last eased
 } g_steering;
 
-// A draw near the car this frame: the body's world, or a front wheel's angle against it.
-void NoteSteering(const double* world, bool on_car, const float* centre) {
-  if (on_car) {
-    std::memcpy(g_steering.body, world, sizeof(g_steering.body));
-    g_steering.have_body = true;
-    return;
-  }
-  if (!g_steering.have_body || !centre) {
-    return;
-  }
-  const double* b = g_steering.body;
-  double axes[3][3];  // the body's right, up, forward (unit)
-  for (int k = 0; k < 3; ++k) {
-    const double l = std::sqrt(b[k] * b[k] + b[4 + k] * b[4 + k] + b[8 + k] * b[8 + k]);
-    for (int r = 0; r < 3; ++r) {
-      axes[k][r] = b[r * 4 + k] / std::max(l, 1e-9);
-    }
-  }
-  double hub[3];
-  for (int r = 0; r < 3; ++r) {
-    hub[r] = world[r * 4] * centre[0] + world[r * 4 + 1] * centre[1] + world[r * 4 + 2] * centre[2] + world[r * 4 + 3] -
-             b[r * 4 + 3];
-  }
-  const auto along = [](const double* v, const double* a) { return v[0] * a[0] + v[1] * a[1] + v[2] * a[2]; };
-  const double x = along(hub, axes[0]), y = along(hub, axes[1]), z = along(hub, axes[2]);
-  if (!(std::fabs(x) > 0.4 && std::fabs(x) < 1.3 && y < 0.8 && z > 0.6 && z < 2.4)) {
-    return;  // not a front road wheel
-  }
-  // Its axle: of its axes, the one along the body's right (the others turn as it rolls).
-  double axle[3] = {0.0, 0.0, 0.0}, best = 0.0;
-  for (int k = 0; k < 3; ++k) {
-    double a[3] = {world[k], world[4 + k], world[8 + k]};
-    const double l = std::sqrt(along(a, a));
-    if (l < 1e-9) {
-      continue;
-    }
-    const double d = along(a, axes[0]) / l;
-    if (std::fabs(d) > std::fabs(best)) {
-      best = d;
-      for (int r = 0; r < 3; ++r) {
-        axle[r] = a[r] / l * (d < 0.0 ? -1.0 : 1.0);
-      }
-    }
-  }
-  if (std::fabs(best) < 0.7) {
-    return;
-  }
-  g_steering.angle_sum += std::atan2(along(axle, axes[2]), along(axle, axes[0]));
-  ++g_steering.angles;
-}
-
-// At a frame's start: the frame before's car meshes and steering angle.
+// At a frame's start: the frame before's car meshes, and the steering angle eased toward the player's steering.
 void SteeringFrame(const std::vector<uint64_t>& car_meshes) {
   std::scoped_lock lock{g_steering.mutex};
   g_steering.car_meshes.clear();
   g_steering.car_meshes.insert(car_meshes.begin(), car_meshes.end());
-  if (g_steering.angles) {
-    g_steering.angle = float(g_steering.angle_sum / g_steering.angles);
+  float steer = 0.f;
+#ifdef _WIN32
+  if (char text[32] = {}; GetEnvironmentVariableA("XERENGE_VR_STEER", text, sizeof(text)) > 0) {
+    steer = std::clamp(float(std::atof(text)), -1.f, 1.f);
   }
+#endif
+  const auto now = std::chrono::steady_clock::now();
+  const float dt = std::clamp(std::chrono::duration<float>(now - g_steering.eased).count(), 0.f, 0.1f);
+  g_steering.eased = now;
+  g_steering.angle += (steer * kFullLock - g_steering.angle) * (1.f - std::exp(-dt / kSteerSeconds));
   if (static int told = 0; std::getenv("XERENGE_VR_CARCHECK") && ++told % 72 == 0) {  // development
-    REXLOG_INFO("VR steering: {:.1f} degrees ({} front wheels)", g_steering.angle * 57.29578f, g_steering.angles);
+    REXLOG_INFO("VR steering: {:.1f} degrees (stick {:.2f})", g_steering.angle * 57.29578f, steer);
   }
-  g_steering.angle_sum = 0.0;
-  g_steering.angles = 0;
-  g_steering.have_body = false;
 }
 
 // Finding the wheel in a mesh's vertices (positions `stride` floats apart from `pos`): its pieces of connected
@@ -451,7 +405,7 @@ SteeringWheel FindSteeringWheel(const float* v, uint32_t count, uint32_t stride,
     float s[3] = {e[0], e[1], e[2]};
     std::sort(s, s + 3);  // s[2] the largest
     const bool disc = s[2] > 0.25f && s[2] < 0.5f && s[1] > 0.75f * s[2] && s[0] < 0.6f * s[1];
-    if (disc && std::fabs(c[0]) > 0.15f && c[1] > 0.15f && c[1] < 0.9f && c[2] > 0.1f && c[2] < 1.f &&
+    if (disc && std::fabs(c[0]) > 0.15f && c[1] > 0.15f && c[1] < 0.9f && c[2] > -0.6f && c[2] < 1.f &&
         piece.n > best_n) {
       best = r, best_n = piece.n;
     }
@@ -1085,10 +1039,7 @@ static bool InterpolateDrawSteps(uint64_t vs_hash, uint64_t mesh_key, bool depth
   }
   double world[16];
   WorldOf(vi.vp, vi.xyw_inverse, c, world);
-  const bool on_car = NoteCockpitCar(world, vi.state, mesh_key);
-  if (g_cockpit_view) {
-    NoteSteering(world, on_car, centre);
-  }
+  NoteCockpitCar(world, vi.state, mesh_key);
   ++vi.draws;
   const auto note_object = [&](const float* m) {  // its origin where it is drawn (the markers' cars)
     if (m[15] > 1.f && vi.objects.size() < 4096) {

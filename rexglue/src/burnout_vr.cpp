@@ -997,11 +997,37 @@ REX_HOOK_RAW(sub_8259C400) {
 }
 
 // The game's XamInputGetState (r3 the player, r4 the state): Y in a race goes round the views (CycleViews).
+// The cockpit's steering wheel turns with the player's steering, the left stick as the game reads it (sThumbLX,
+// big-endian at +8), not with the front wheels as drawn: those shook when the car hit a wall or another car (Matt
+// 2026-11-02: "the steering wheel jitters a lot, can we remove that effect so its just affected by your turning").
+// For plume (plume_vr.cpp SteeringFrame) as XERENGE_VR_STEER, -1 (left) to 1: the pad turned furthest of those read.
+void PublishSteer(uint8_t* base, uint32_t user, uint32_t state) {
+  static int16_t sticks[4] = {};
+  static int16_t published = 0;
+  if (user >= 4 || !vr::Active()) {
+    return;
+  }
+  const uint8_t* x = xerenge::GuestPointer(base, state + 8);
+  const bool paused = *xerenge::GuestPointer(base, kRacePaused) != 0;  // the stick moves through the pause menu
+  sticks[user] = paused ? 0 : int16_t(uint16_t(x[0]) << 8 | x[1]);
+  int16_t steer = 0;
+  for (const int16_t v : sticks) {
+    steer = std::abs(v) > std::abs(steer) ? v : steer;
+  }
+  if (steer != published) {
+    published = steer;
+#ifdef _WIN32
+    SetEnvironmentVariableA("XERENGE_VR_STEER", fmt::format("{:.4f}", std::max(steer / 32767.f, -1.f)).c_str());
+#endif
+  }
+}
+
 REX_HOOK_RAW(sub_825AFE90) {
   const uint32_t user = ctx.r3.u32, state = ctx.r4.u32;
   __imp__sub_825AFE90(ctx, base);
   if (ctx.r3.u32 == 0) {
     CycleViews(base, user, state);
+    PublishSteer(base, user, state);
   }
 }
 

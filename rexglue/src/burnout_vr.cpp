@@ -94,8 +94,21 @@ void PublishSeat();
 
 // The player's car's model in the cockpit (plume_vr.cpp, XERENGE_VR_CARMODEL; 0 before it is known): each has its own
 // cockpit seat, vr_cockpit_offset_<model> - the cars' cabins are different heights (Matt 2026-11-01: "we need to store
-// the user offset per car"). A car without one starts from vr_cockpit_offset, then kCockpitSeat.
+// the user offset per car"). A car without one in xerenge.conf starts from its seat below, else vr_cockpit_offset, then
+// kCockpitSeat.
 std::atomic<uint64_t> g_car_model{0};
+
+// The seats set in the headset for these cars (Matt's xerenge.conf, 2026-11-02), each its car's default.
+constexpr struct {
+  uint64_t model;
+  const char* seat;
+} kCarSeats[] = {
+    {0xA1429E9050BB888Cull, "-0.350 0.581 0.000"},
+    {0xC23F78068B1CA22Eull, "-0.350 0.627 0.434"},
+    {0x7493DB30A0EBB659ull, "-0.320 0.533 0.000"},
+    {0x8EEE510D86415080ull, "-0.344 0.581 -0.167"},
+    {0xDEC33817AE63266Cull, "-0.350 0.613 0.000"},
+};
 
 std::string SeatKey() {
   if (!g_cockpit_now.load(std::memory_order_relaxed)) {
@@ -107,9 +120,15 @@ std::string SeatKey() {
 
 void LoadSeat() {
   float x = 0.f, y = 0.f, z = 0.f;
-  const std::string fallback = !g_cockpit_now.load() ? std::string("0 0 0")
-                               : g_car_model.load() ? xerenge::settings::ConfString("vr_cockpit_offset", kCockpitSeat)
-                                                    : std::string(kCockpitSeat);
+  const uint64_t model = g_car_model.load();
+  std::string fallback = !g_cockpit_now.load() ? std::string("0 0 0")
+                         : model ? xerenge::settings::ConfString("vr_cockpit_offset", kCockpitSeat)
+                                 : std::string(kCockpitSeat);
+  for (const auto& car : kCarSeats) {
+    if (g_cockpit_now.load() && car.model == model) {
+      fallback = car.seat;
+    }
+  }
   if (std::sscanf(xerenge::settings::ConfString(SeatKey(), fallback).c_str(), "%f %f %f", &x, &y, &z) == 3) {
     g_seat[0] = std::clamp(x, -kSeatRange[0], kSeatRange[0]);
     g_seat[1] = std::clamp(y, -kSeatRange[1], kSeatRange[1]);

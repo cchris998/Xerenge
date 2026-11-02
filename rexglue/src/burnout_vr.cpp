@@ -141,13 +141,11 @@ void StoreFloat(uint8_t* base, uint32_t address, float value);
 // 22 cm at 36 m/s, 42 cm at 55 m/s - and pinned to that the view slid back through the car accelerating and forward
 // braking (Matt: "We need to be pinned depth too").
 constexpr uint32_t kPlayerCarMatrix = 0x82CE0040u;
-// 1 while the player accelerates in the race: from the countdown's first shot (not before it), 0 again a second or two
-// after letting go and while paused.
-constexpr uint32_t kRaceAccelerating = 0x82846B80u;
 constexpr uint32_t kRacePaused = 0x828466E4u;  // a byte: 1 while the race's pause menu is up
-// The countdown: the game's own shots between the race's introduction (its chase camera, ~3.5 s) and the GO, 5.4 s
-// (3, 2, 1: one shot each). Its chase camera back after this many updates of others (60 a second) is the GO.
-constexpr int kCountdownUpdates = 120;
+// The event's clock (a float, seconds): 0 till its GO, a race's after the countdown and a crash event's alike, then
+// running (memory snapshots across both GOs; simulator 2026-11-02). Its starts have no other sure sign: the start
+// rolls, a crash event has no countdown, and the accelerating flag (0x82846B80) is 1 through the countdown.
+constexpr uint32_t kRaceClock = 0x82A513E8u;
 
 struct Pin {
   std::mutex mutex;
@@ -160,7 +158,6 @@ struct Pin {
   size_t next_camera = 0;
   bool have_car = false;  // the car there the update before
   int chase_updates = 0;  // updates in a row the game's camera has been its chase camera
-  int shot_updates = 0;   // ... and another camera (before the GO: the countdown's shots)
   uint64_t model_seen = 0;  // the car's model (plume), and for how many steps the same
   int model_steps = 0;
 } g_pin;
@@ -191,7 +188,6 @@ void PinCamera(uint8_t* base, uint32_t m) {
     g_game_view = GameView::kUnknown;
     g_pin.have_relative = false;
     g_pin.model_steps = 0;
-    g_pin.shot_updates = 0;
 #ifdef _WIN32
     SetEnvironmentVariableA("XERENGE_VR_CARMODEL", nullptr);  // the last race's car's
     SetEnvironmentVariableA("XERENGE_VR_NO_MARKERS", nullptr);  // the last event's results
@@ -200,10 +196,9 @@ void PinCamera(uint8_t* base, uint32_t m) {
   g_pin.have_car = have_car;
   // The game's camera its usual chase camera (1.18 m up and 4.6 m behind the car, looking its way; the spring swings it
   // half a metre aside) for 5 updates: the countdown's shots, a takedown's and a crash's are the game's own (Matt
-  // 2026-11-01: "the camera usually zooms to the crashed car, we should respect that"). The race is on (latched till
-  // the next) from its GO: the chase camera back after the countdown's shots - the introduction before them shows the
-  // chase camera too (Matt: not "during the race countdown. Only once the race starts") - or the player accelerating
-  // (an event without the shots).
+  // 2026-11-01: "the camera usually zooms to the crashed car, we should respect that"). The race is on while its clock
+  // runs, from its GO (Matt: not "during the race countdown. Only once the race starts"; "some events only have GO, and
+  // no countdown, so find the GO as a trigger").
   {
     float game[4][3];
     ReadCar(base, m, game);
@@ -243,10 +238,9 @@ void PinCamera(uint8_t* base, uint32_t m) {
       g_pin.chase_updates = 5;
     }
     g_chase_view = g_pin.chase_updates >= 5;
-    g_pin.shot_updates = chase || bumper ? g_pin.shot_updates : std::min(g_pin.shot_updates + 1, kCountdownUpdates);
-    if (have_car && ((g_chase_view && g_pin.shot_updates >= kCountdownUpdates) ||
-                     xerenge::LoadGuestU32(base, kRaceAccelerating) == 1)) {
-      g_race_on = true;
+    const float clock = LoadFloat(base, kRaceClock);
+    if (const bool on = have_car && clock > 0.f; g_race_on.exchange(on) != on) {
+      REXLOG_INFO("VR: the race {} (its clock {:.3f} s)", on ? "on" : "off", clock);
     }
     if (chase || held || bumper) {
       g_view_seen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(

@@ -1065,12 +1065,23 @@ static bool InterpolateDrawSteps(uint64_t vs_hash, uint64_t mesh_key, bool depth
   // each draw of the state before once. Else the nearest gives it a travel for the next step to pair it by, and it is
   // drawn as it is or carried (below).
   const double span = std::max(1.0, vi.state - vi.prev_state);
-  // Its travel taken again, or a whole number of times, or half: a crash event's cars (White Mountain, Swiss Roll) move
-  // 1 to 5 of the game's ticks (0.17 m at 10 m/s) between states counted one apart, and by the last step's travel
-  // alone 15-80% of their draws missed their pair by 0.12-0.5 m and were drawn as they are - the cars and their parts
-  // juddered against the camera drawn between steps (Matt 2026-11-02).
-  static constexpr double kAllTravels[] = {1.0, 2.0, 0.5, 3.0, 4.0};
-  static const std::span<const double> kTravels{kAllTravels, std::getenv("XERENGE_VR_ONE_TRAVEL") ? 1u : 5u};  // dev
+  // Along its travel, by any amount up to kTravelReach times it: a crash event's cars (White Mountain, Swiss Roll) move
+  // 1 to 5 of the game's ticks between states counted one apart (0.25 to 6 times the step before's travel), and by that
+  // travel alone 15-80% of their draws missed their pair by 0.12-0.5 m and were drawn as they are - the cars and their
+  // parts juddered against the camera drawn between steps (Matt 2026-11-02). Its distance from that stretch of line.
+  // XERENGE_VR_ONE_TRAVEL=1: the travel once only (development).
+  constexpr double kTravelReach = 6.0;
+  static const bool one_travel = std::getenv("XERENGE_VR_ONE_TRAVEL") != nullptr;
+  const auto along_travel = [&](const double* v, const double* travel) {  // v: from where it was
+    const double t[3] = {travel[0] * span, travel[1] * span, travel[2] * span};
+    const double tt = t[0] * t[0] + t[1] * t[1] + t[2] * t[2];
+    double s = 1.0;
+    if (!one_travel && tt > 1e-12) {
+      s = std::clamp((v[0] * t[0] + v[1] * t[1] + v[2] * t[2]) / tt, 0.0, kTravelReach);
+    }
+    return std::sqrt((v[0] - s * t[0]) * (v[0] - s * t[0]) + (v[1] - s * t[1]) * (v[1] - s * t[1]) +
+                     (v[2] - s * t[2]) * (v[2] - s * t[2]));
+  };
   const double origin_rel[3] = {world[3] - vi.eye[0], world[7] - vi.eye[1], world[11] - vi.eye[2]};
   // How far the matrix's origin is from where the state before's draw `d` puts it: still, on by its travel, or the
   // same relative to the camera.
@@ -1078,11 +1089,8 @@ static bool InterpolateDrawSteps(uint64_t vs_hash, uint64_t mesh_key, bool depth
     const auto l = [](double x, double y, double z) { return std::sqrt(x * x + y * y + z * z); };
     double cost = l(world[3] - d.m[3], world[7] - d.m[7], world[11] - d.m[11]);
     if (d.moving) {
-      for (const double k : kTravels) {
-        cost = std::min(cost, l(world[3] - d.m[3] - d.origin_travel[0] * span * k,
-                                world[7] - d.m[7] - d.origin_travel[1] * span * k,
-                                world[11] - d.m[11] - d.origin_travel[2] * span * k));
-      }
+      const double v[3] = {world[3] - d.m[3], world[7] - d.m[7], world[11] - d.m[11]};
+      cost = std::min(cost, along_travel(v, d.origin_travel));
     }
     return std::min(cost, l(origin_rel[0] - d.origin_rel[0], origin_rel[1] - d.origin_rel[1],
                             origin_rel[2] - d.origin_rel[2]));
@@ -1111,11 +1119,8 @@ static bool InterpolateDrawSteps(uint64_t vs_hash, uint64_t mesh_key, bool depth
       }
       double cost = length(here[0] - d.at[0], here[1] - d.at[1], here[2] - d.at[2]);
       if (d.moving) {
-        for (const double k : kTravels) {
-          cost = std::min(cost, length(here[0] - d.at[0] - d.travel[0] * span * k,
-                                       here[1] - d.at[1] - d.travel[1] * span * k,
-                                       here[2] - d.at[2] - d.travel[2] * span * k));
-        }
+        const double v[3] = {here[0] - d.at[0], here[1] - d.at[1], here[2] - d.at[2]};
+        cost = std::min(cost, along_travel(v, d.travel));
       }
       cost = std::min(cost, length(rel[0] - d.rel[0], rel[1] - d.rel[1], rel[2] - d.rel[2]));
       // And by its matrix's origin: a mesh whose centre is off its matrix's turn (a part 2.5 m from it, on a car
@@ -1135,6 +1140,23 @@ static bool InterpolateDrawSteps(uint64_t vs_hash, uint64_t mesh_key, bool depth
         if (const double l = length(here[0] - d.at[0], here[1] - d.at[1], here[2] - d.at[2]); l < nearest) {
           nearest = l;
           from = &d;
+        }
+      }
+      // Sure after all when that nearest is clearly the one: within kClearReach a step and under half the next nearest's
+      // distance (a car turning, braking or hit leaves its travel's line; its own wheels, the same mesh 1.5-2.6 m apart,
+      // are not clear and stay unpaired). The crash event's cars before the crash: 9-16% of their draws missed so.
+      constexpr double kClearReach = 1.0;
+      static const bool clear_test = !(std::getenv("XERENGE_VR_CLEAR_PAIR") && std::getenv("XERENGE_VR_CLEAR_PAIR")[0] == '0');
+      if (clear_test && from && from->used != frame.serial && nearest < kClearReach * span) {
+        double second = 1e30;
+        for (const StepDraw& d : before->second) {
+          if (&d != from && d.used != frame.serial) {
+            second = std::min(second, length(here[0] - d.at[0], here[1] - d.at[1], here[2] - d.at[2]));
+          }
+        }
+        if (nearest < 0.5 * second) {
+          sure = true;
+          from->used = frame.serial;
         }
       }
     } else {

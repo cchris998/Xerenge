@@ -594,6 +594,15 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
     if (!std::getenv("MCLA_VR_CAMERA_VS")) {
       _putenv_s("MCLA_VR_CAMERA_VS", "C3FF17490757589F,1A563CA9A421178A,ACB68BA117ABC107");
     }
+    // Frames overlapped (plume's XERENGE_ASYNC_PRESENT): the render thread records a frame while the GPU draws the one
+    // before. Waiting for each frame's GPU work first, a crash event's frames (6.5 ms recording, then 7 ms on the GPU)
+    // missed the headset's 72 Hz: 48-52 FPS, the head and the cars stuttering (Matt 2026-11-02); overlapped, 72.0.
+    // XERENGE_ASYNC_PRESENT=0 waits again.
+    if (const char* overlap = std::getenv("XERENGE_ASYNC_PRESENT"); !overlap) {
+      _putenv_s("XERENGE_ASYNC_PRESENT", "1");
+    } else if (overlap[0] == '0') {
+      _putenv_s("XERENGE_ASYNC_PRESENT", "");
+    }
     REXLOG_INFO("VR: the plume renderer");
     return;
   }

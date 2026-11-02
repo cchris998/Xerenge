@@ -9,11 +9,34 @@ no CPU interpreter and no JIT.
 with the European ISO alone. Other dumps (the USA release, the beta, other
 regions) are not supported.
 
-## VR (0.4.9-vr-0.1)
+## VR (0.4.9-vr-0.2)
 
 This build plays Burnout Revenge in a VR headset through OpenXR (tested with
 SteamVR). Head tracking, stereo 3D, the HUD on its own panel and the car
 markers at their cars' depth all work in races, menus and replays.
+
+### What's new in 0.4.9-vr-0.2 (since 0.4.9-vr-0.1)
+
+- **Cockpit view.** A new view from the driver's seat, added to the game's own
+  list of race views: **Y** goes round the bumper view, the cockpit and the
+  chase view (see *Cockpit view* below). The view is fixed to the car, the
+  windows are clear, the roof and pillars are no longer cut away close to your
+  eyes, and the steering wheel turns with your steering.
+- **Seat position.** The arrow keys move the view left, right, up and down, and
+  **Ctrl+Up/Down** forward and back. The chase view and each car's cockpit keep
+  their own position, and five cars come with their cockpit seat already set.
+- **The cockpit comes in at the GO.** In races with a 3-2-1 countdown and in
+  events that only have a GO (Crash events), whatever you press during the
+  countdown. It stays on over jumps and hard hits against walls, and the game's
+  own crash and takedown cameras still take over.
+- **Crash events run at full frame rate.** The headset's frame rate no longer
+  drops during crashes (it fell to about 50 FPS at 72 Hz), so head turns stay
+  smooth, and the traffic and car parts move smoothly instead of juddering.
+- **Fixes:** far signs no longer flicker against their boards; the race markers
+  show, steady, in the cockpit view; the results screen after a race keeps its
+  panels and text on the HUD instead of grey boxes stuck to your view.
+- **The European release only.** This build supports the European disc image
+  only; the USA release is not supported.
 
 - **Starting it:** the installer adds a **Burnout Revenge VR** shortcut beside
   the normal one. Start your headset's OpenXR runtime (SteamVR) first.

@@ -78,7 +78,8 @@ void TurnViewSpaceDraw(float* vs_constants);
 // scene goes from where it was at the state before to where it is, as the SDK's xenos path does
 // (command_processor.cpp). Its world is its WVP (c0-c3) over the frame's camera, the WVP of MCLA_VR_CAMERA_VS's draws.
 // `centre`: the mesh's centre in its own space (null: its origin), where it is placed from. True with the draw's c0-c3
-// to use in `wvp_out`. Every depth-tested draw of the camera's target is recorded.
+// to use in `wvp_out`. Every depth-tested draw of the camera's target is recorded. In the cockpit the player car's own
+// draws also get a near plane of their own there (plume_vr.cpp CockpitNearDraw).
 bool InterpolateDraw(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uint32_t target_width,
                      const float* vs_constants, const float* centre, float* wvp_out);
 

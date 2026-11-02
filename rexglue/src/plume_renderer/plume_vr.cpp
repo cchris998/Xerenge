@@ -978,8 +978,8 @@ void PlaceMarker(float* c, const float* centre) {
   }
 }
 
-bool InterpolateDraw(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uint32_t target_width, const float* c,
-                     const float* centre, float* wvp_out) {
+static bool InterpolateDrawSteps(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uint32_t target_width,
+                                 const float* c, const float* centre, float* wvp_out) {
   const FramePose& frame = g_frame;
   if (!Stereo() || !frame.posed || !frame.interpolated || !depth_tested) {
     return false;
@@ -1515,6 +1515,60 @@ bool InterpolateDraw(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uin
     vi.track[3] = c[7] / c[15];
   }
   return true;
+}
+
+// In the cockpit the game's near plane (0.5 m) cut away the roof and pillars inches from the eyes (Matt 2026-11-01: "Make
+// the ceiling not cull out too close to the camera"). Moved to 5 cm for the whole view, the depth's precision was a tenth
+// and far signs flickered against their boards in every view (Matt 2026-11-02; at 0.2 m still 258 of 3800 pixels of a
+// banner 60 m away wrong, at 0.3 m 15). So the world keeps the game's, and the player car's own draws (their origin within
+// 2.5 m of the car's place, the main view) clip at kCockpitNear with their depth in [0, kCockpitDepth): z = s (w - near).
+// Nothing of the world is inside the car, and the world's depth reaches s only at 0.5 / (1 - s) m, inside its own near
+// plane: the car is in front of all of it.
+constexpr float kCockpitNear = 0.05f, kCockpitDepth = 0.1f;
+
+bool CockpitNearDraw(uint64_t vs_hash, bool depth_tested, uint32_t target_width, const float* c, bool moved,
+                     float* wvp_out) {
+  static const bool off =  // development: XERENGE_VR_COCKPIT_NEARDRAW=0, the game's near plane for the car too
+      std::getenv("XERENGE_VR_COCKPIT_NEARDRAW") && std::getenv("XERENGE_VR_COCKPIT_NEARDRAW")[0] == '0';
+  // Not those drawn about the camera (their origin at the eye, clip x, y and w 0: the sky and the haze over the world -
+  // in front of it they hid the town).
+  if (off || !g_cockpit_view || !Stereo() || !depth_tested || CameraVertexShader(vs_hash) ||
+      std::fabs(c[12]) + std::fabs(c[13]) + std::fabs(c[14]) < 1e-6f ||
+      (std::fabs(c[15]) < 1e-3f && std::fabs(c[3]) < 1e-3f && std::fabs(c[7]) < 1e-3f)) {
+    return false;
+  }
+  {
+    Interpolation& vi = g_interpolation;
+    std::scoped_lock lock{vi.mutex};
+    if (!vi.have_vp || target_width != vi.vp_width) {
+      return false;
+    }
+    double world[16];
+    WorldOf(vi.vp, vi.xyw_inverse, c, world);
+    bool own = false;
+    for (int i = 0; i < g_cockpit_car.count && !own; ++i) {
+      const double* p = g_cockpit_car.states[i];
+      const double dx = world[3] - p[1], dy = world[7] - p[2], dz = world[11] - p[3];
+      own = dx * dx + dy * dy + dz * dz < 2.5 * 2.5;
+    }
+    if (!own) {
+      return false;
+    }
+  }
+  if (!moved) {
+    std::memcpy(wvp_out, c, 16 * sizeof(float));
+  }
+  for (int k = 0; k < 3; ++k) {
+    wvp_out[8 + k] = kCockpitDepth * wvp_out[12 + k];
+  }
+  wvp_out[11] = kCockpitDepth * (wvp_out[15] - kCockpitNear);
+  return true;
+}
+
+bool InterpolateDraw(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uint32_t target_width, const float* c,
+                     const float* centre, float* wvp_out) {
+  const bool moved = InterpolateDrawSteps(vs_hash, mesh_key, depth_tested, target_width, c, centre, wvp_out);
+  return CockpitNearDraw(vs_hash, depth_tested, target_width, c, moved, wvp_out) || moved;
 }
 
 uint32_t HudBlendControl(uint32_t blend_control) {

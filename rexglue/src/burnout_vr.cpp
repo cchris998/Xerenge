@@ -1161,12 +1161,6 @@ REX_HOOK_RAW(sub_8234ABC0) {
     StoreFloat(base, window + 0, t_tangents[1]);
     StoreFloat(base, window + 4, t_tangents[2]);
     vr::SetFramePose(t_pose, t_tangents);
-    // In the cockpit view (C) the near plane from 0.5 m (RwCamera +112, far +116) to
-    // 5 cm: the roof and pillars, inches from the eyes, were cut away (Matt 2026-11-01: "Make the ceiling not cull out
-    // too close to the camera").
-    if (InCockpit()) {
-      StoreFloat(base, ctx.r3.u32 + 112, 0.05f);
-    }
   }
   __imp__sub_8234ABC0(ctx, base);
 }

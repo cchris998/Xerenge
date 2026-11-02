@@ -142,8 +142,10 @@ void StoreFloat(uint8_t* base, uint32_t address, float value);
 // braking (Matt: "We need to be pinned depth too").
 constexpr uint32_t kPlayerCarMatrix = 0x82CE0040u;
 // 1 while the player accelerates in the race: from the countdown's first shot (not before it), 0 again a second or two
-// after letting go and while paused.
+// after letting go and while paused. Taken for the GO only with the car moving (kStartSpeed): held through the
+// introduction and the countdown it put the cockpit over their chase-like shots (Matt 2026-11-02).
 constexpr uint32_t kRaceAccelerating = 0x82846B80u;
+constexpr float kStartSpeed = 2.f;  // m/s: the car moving, as it cannot before the GO
 constexpr uint32_t kRacePaused = 0x828466E4u;  // a byte: 1 while the race's pause menu is up
 // The countdown: the game's own shots between the race's introduction (its chase camera, ~3.5 s) and the GO, 5.4 s
 // (3, 2, 1: one shot each). Its chase camera back after this many updates of others (60 a second) is the GO.
@@ -154,6 +156,7 @@ struct Pin {
   bool have_relative = false;  // the camera's axes in the car's (rows 0-2), snapped to the car's: -1, 0 or 1 each
   float relative[3][3]{};
   float last_pos[3]{};
+  std::chrono::steady_clock::time_point last_time{};  // when last_pos was taken
   float last_offset[3]{};  // the game's camera from the car (world), the update before
   // The game's own (chase) camera for each pinned one lately: it projects the race's markers with it (FrameMarkerCamera).
   std::array<std::array<float, 24>, 32> cameras{};  // pinned rows right, up, at, pos, then the game's
@@ -182,6 +185,11 @@ void PinCamera(uint8_t* base, uint32_t m) {
   ReadCar(base, kPlayerCarMatrix, car);
   const float at2 = car[2][0] * car[2][0] + car[2][1] * car[2][1] + car[2][2] * car[2][2];
   const float jx = car[3][0] - g_pin.last_pos[0], jy = car[3][1] - g_pin.last_pos[1], jz = car[3][2] - g_pin.last_pos[2];
+  const auto now_time = std::chrono::steady_clock::now();
+  const float dt = std::chrono::duration<float>(now_time - g_pin.last_time).count();
+  g_pin.last_time = now_time;
+  const float moved = std::sqrt(jx * jx + jy * jy + jz * jz);  // a placing (a new race, a restart) is not speed
+  const float speed = dt > 0.f && dt < 0.25f && moved < 3.f ? moved / dt : 0.f;
   // No car (a menu), or it jumped more than 50 m in a step (a new race, a restart): the race not on till its GO (below),
   // and the car's model taken again.
   const bool have_car = std::fabs(at2 - 1.f) < 0.05f;
@@ -245,7 +253,7 @@ void PinCamera(uint8_t* base, uint32_t m) {
     g_chase_view = g_pin.chase_updates >= 5;
     g_pin.shot_updates = chase || bumper ? g_pin.shot_updates : std::min(g_pin.shot_updates + 1, kCountdownUpdates);
     if (have_car && ((g_chase_view && g_pin.shot_updates >= kCountdownUpdates) ||
-                     xerenge::LoadGuestU32(base, kRaceAccelerating) == 1)) {
+                     (xerenge::LoadGuestU32(base, kRaceAccelerating) == 1 && speed > kStartSpeed))) {
       g_race_on = true;
     }
     if (chase || held || bumper) {

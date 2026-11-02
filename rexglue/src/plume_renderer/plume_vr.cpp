@@ -58,6 +58,8 @@ struct FramePose {
   std::chrono::steady_clock::time_point taken{};  // when its pose was taken (the headset's look-ahead measure)
   bool cameras = false;  // the logic state's camera and the drawn one (NoteFrameCameras)
   float logic_camera[12]{}, drawn_camera[12]{};
+  bool marker_camera_set = false;  // in the cockpit: the game's own camera, the markers projected with it
+  float marker_camera[12]{};
 };
 std::mutex g_pose_mutex;
 std::deque<FramePose> g_poses;  // presented frames' poses, in order, for the submissions
@@ -177,6 +179,13 @@ FramePose TakeBuiltFrame() {
   FramePose frame;
   frame.taken = xr::CameraPoseTime();
   frame.cameras = xr::TakeFrameCameras(frame.logic_camera, frame.drawn_camera);
+#ifdef _WIN32
+  if (char text[320] = {}; GetEnvironmentVariableA("XERENGE_VR_MARKERCAM", text, sizeof(text)) > 0) {
+    float* m = frame.marker_camera;
+    frame.marker_camera_set = std::sscanf(text, "%f %f %f %f %f %f %f %f %f %f %f %f", &m[0], &m[1], &m[2], &m[3],
+                                          &m[4], &m[5], &m[6], &m[7], &m[8], &m[9], &m[10], &m[11]) == 12;
+  }
+#endif
   frame.posed = xr::TakeCameraPose(*reinterpret_cast<float(*)[16]>(frame.pose),
                                    *reinterpret_cast<float(*)[4]>(frame.tangents));
   // Named while the frame was built (burnout_vr.cpp InterpolateCamera, keyed by the swaps before its own).
@@ -253,12 +262,294 @@ bool ViewSpaceDraw(const float* c) {
 // The seat offset (burnout_vr.cpp: the arrow keys), in the headset's space like the pose's translation: the game's
 // camera is moved by it, so the view-space draws are too. Read once a frame (BeginFrame).
 float g_seat_offset[3] = {0.f, 0.f, 0.f};
+bool g_cockpit_view = false;  // the cockpit view (burnout_vr.cpp, the fourth number)
 
 void ReadSeatOffset() {
 #ifdef _WIN32
   char text[96] = {};
   if (GetEnvironmentVariableA("XERENGE_VR_SEAT", text, sizeof(text)) > 0) {
-    std::sscanf(text, "%f %f %f", &g_seat_offset[0], &g_seat_offset[1], &g_seat_offset[2]);
+    int cockpit = 0;
+    std::sscanf(text, "%f %f %f %d", &g_seat_offset[0], &g_seat_offset[1], &g_seat_offset[2], &cockpit);
+    g_cockpit_view = cockpit != 0;
+  }
+#endif
+}
+
+// The player's car's model (burnout_vr.cpp keeps a cockpit seat for each: the cars' cabins are different heights -
+// Matt 2026-11-01): the meshes drawn with the car's own matrix - its place as burnout_vr.cpp has it for the logic state
+// drawn (XERENGE_VR_CAR0: the last few states' places), within a centimetre: the body and the parts fixed to it, nothing
+// else - their keys (shaders, primitive and index count: the same model, the same meshes, whichever session) combined,
+// published at the next frame's start as XERENGE_VR_CARMODEL in the process's environment.
+struct CockpitCar {
+  double states[4][4]{};  // logic state, x, y, z
+  int count = 0;
+  std::vector<uint64_t> meshes;
+} g_cockpit_car;
+
+// The cockpit's steering wheel turned as the car steers (Matt 2026-11-01: "find the steering wheel model of the car, and
+// rotate it as we steer"). It is part of the car's interior model: of the meshes drawn with the car's matrix, the one
+// with a disc-shaped piece of its own (connected triangles: 0.25-0.5 m across, flat) to one side, ahead of the middle -
+// Angel Valley's car's 298 vertices of 1525. Those vertices are turned about the disc's axis (the steering column) by
+// the front wheels' steering angle (their axles against the body's, drawn the frame before) times kWheelRatio, as plume
+// unpacks them (plume_draw.cpp; the mesh kept out of the vertex cache in the cockpit).
+constexpr float kWheelRatio = 12.f;  // the front wheels turn ~8 degrees at full lock: ~95 at the wheel
+struct SteeringWheel {
+  bool found = false;
+  std::vector<uint32_t> vertices;  // the wheel's, of the unpacked ones
+  float hub[3]{}, axis[3]{};
+};
+struct CockpitSteering {
+  std::mutex mutex;
+  std::unordered_set<uint64_t> car_meshes;  // the car's meshes, the frame before
+  std::unordered_map<uint64_t, SteeringWheel> wheels;  // by mesh: what was found in it
+  bool have_body = false;  // this frame: the body's world, the front wheels' angles
+  double body[16]{};
+  double angle_sum = 0.0;
+  int angles = 0;
+  float angle = 0.f;  // the steering angle (radians, the frame before)
+} g_steering;
+
+// A draw near the car this frame: the body's world, or a front wheel's angle against it.
+void NoteSteering(const double* world, bool on_car, const float* centre) {
+  if (on_car) {
+    std::memcpy(g_steering.body, world, sizeof(g_steering.body));
+    g_steering.have_body = true;
+    return;
+  }
+  if (!g_steering.have_body || !centre) {
+    return;
+  }
+  const double* b = g_steering.body;
+  double axes[3][3];  // the body's right, up, forward (unit)
+  for (int k = 0; k < 3; ++k) {
+    const double l = std::sqrt(b[k] * b[k] + b[4 + k] * b[4 + k] + b[8 + k] * b[8 + k]);
+    for (int r = 0; r < 3; ++r) {
+      axes[k][r] = b[r * 4 + k] / std::max(l, 1e-9);
+    }
+  }
+  double hub[3];
+  for (int r = 0; r < 3; ++r) {
+    hub[r] = world[r * 4] * centre[0] + world[r * 4 + 1] * centre[1] + world[r * 4 + 2] * centre[2] + world[r * 4 + 3] -
+             b[r * 4 + 3];
+  }
+  const auto along = [](const double* v, const double* a) { return v[0] * a[0] + v[1] * a[1] + v[2] * a[2]; };
+  const double x = along(hub, axes[0]), y = along(hub, axes[1]), z = along(hub, axes[2]);
+  if (!(std::fabs(x) > 0.4 && std::fabs(x) < 1.3 && y < 0.8 && z > 0.6 && z < 2.4)) {
+    return;  // not a front road wheel
+  }
+  // Its axle: of its axes, the one along the body's right (the others turn as it rolls).
+  double axle[3] = {0.0, 0.0, 0.0}, best = 0.0;
+  for (int k = 0; k < 3; ++k) {
+    double a[3] = {world[k], world[4 + k], world[8 + k]};
+    const double l = std::sqrt(along(a, a));
+    if (l < 1e-9) {
+      continue;
+    }
+    const double d = along(a, axes[0]) / l;
+    if (std::fabs(d) > std::fabs(best)) {
+      best = d;
+      for (int r = 0; r < 3; ++r) {
+        axle[r] = a[r] / l * (d < 0.0 ? -1.0 : 1.0);
+      }
+    }
+  }
+  if (std::fabs(best) < 0.7) {
+    return;
+  }
+  g_steering.angle_sum += std::atan2(along(axle, axes[2]), along(axle, axes[0]));
+  ++g_steering.angles;
+}
+
+// At a frame's start: the frame before's car meshes and steering angle.
+void SteeringFrame(const std::vector<uint64_t>& car_meshes) {
+  std::scoped_lock lock{g_steering.mutex};
+  g_steering.car_meshes.clear();
+  g_steering.car_meshes.insert(car_meshes.begin(), car_meshes.end());
+  if (g_steering.angles) {
+    g_steering.angle = float(g_steering.angle_sum / g_steering.angles);
+  }
+  if (static int told = 0; std::getenv("XERENGE_VR_CARCHECK") && ++told % 72 == 0) {  // development
+    REXLOG_INFO("VR steering: {:.1f} degrees ({} front wheels)", g_steering.angle * 57.29578f, g_steering.angles);
+  }
+  g_steering.angle_sum = 0.0;
+  g_steering.angles = 0;
+  g_steering.have_body = false;
+}
+
+// Finding the wheel in a mesh's vertices (positions `stride` floats apart from `pos`): its pieces of connected
+// triangles (a list, a fan or a strip; positions alike joined), and of them the disc.
+SteeringWheel FindSteeringWheel(const float* v, uint32_t count, uint32_t stride, uint32_t pos, uint32_t prim) {
+  SteeringWheel wheel;
+  const auto at = [&](uint32_t i) { return v + size_t(i) * stride + pos; };
+  std::vector<uint32_t> parent(count);
+  for (uint32_t i = 0; i < count; ++i) {
+    parent[i] = i;
+  }
+  const auto root = [&](uint32_t x) {
+    while (parent[x] != x) {
+      x = parent[x] = parent[parent[x]];
+    }
+    return x;
+  };
+  const auto join = [&](uint32_t a, uint32_t b) { parent[root(a)] = root(b); };
+  std::unordered_map<uint64_t, uint32_t> same;  // a position (to 0.01 mm) -> a vertex there
+  for (uint32_t i = 0; i < count; ++i) {
+    const float* p = at(i);
+    uint64_t h = 1469598103934665603ull;
+    for (int k = 0; k < 3; ++k) {
+      h = (h ^ uint64_t(int64_t(std::llround(double(p[k]) * 100000.0)))) * 1099511628211ull;
+    }
+    if (const auto [it, added] = same.try_emplace(h, i); !added) {
+      join(i, it->second);
+    }
+  }
+  const auto triangle = [&](uint32_t a, uint32_t b, uint32_t c) {
+    const float *pa = at(a), *pb = at(b), *pc = at(c);
+    const float u[3] = {pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]};
+    const float w[3] = {pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]};
+    const float n[3] = {u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]};
+    if (n[0] * n[0] + n[1] * n[1] + n[2] * n[2] > 1e-14f) {  // not a strip's joining one
+      join(a, b);
+      join(b, c);
+    }
+  };
+  if (prim == 4) {  // a list
+    for (uint32_t i = 0; i + 2 < count; i += 3) {
+      triangle(i, i + 1, i + 2);
+    }
+  } else if (prim == 5) {  // a fan
+    for (uint32_t i = 1; i + 1 < count; ++i) {
+      triangle(0, i, i + 1);
+    }
+  } else if (prim == 6) {  // a strip
+    for (uint32_t i = 0; i + 2 < count; ++i) {
+      triangle(i, i + 1, i + 2);
+    }
+  } else {
+    return wheel;
+  }
+  struct Piece {
+    uint32_t n = 0;
+    float low[3] = {1e30f, 1e30f, 1e30f}, high[3] = {-1e30f, -1e30f, -1e30f};
+  };
+  std::unordered_map<uint32_t, Piece> pieces;
+  for (uint32_t i = 0; i < count; ++i) {
+    Piece& piece = pieces[root(i)];
+    ++piece.n;
+    for (int k = 0; k < 3; ++k) {
+      piece.low[k] = std::min(piece.low[k], at(i)[k]);
+      piece.high[k] = std::max(piece.high[k], at(i)[k]);
+    }
+  }
+  uint32_t best = ~0u, best_n = 0;
+  for (const auto& [r, piece] : pieces) {
+    float e[3], c[3];
+    for (int k = 0; k < 3; ++k) {
+      e[k] = piece.high[k] - piece.low[k];
+      c[k] = 0.5f * (piece.high[k] + piece.low[k]);
+    }
+    float s[3] = {e[0], e[1], e[2]};
+    std::sort(s, s + 3);  // s[2] the largest
+    const bool disc = s[2] > 0.25f && s[2] < 0.5f && s[1] > 0.75f * s[2] && s[0] < 0.6f * s[1];
+    if (disc && std::fabs(c[0]) > 0.15f && c[1] > 0.15f && c[1] < 0.9f && c[2] > 0.1f && c[2] < 1.f &&
+        piece.n > best_n) {
+      best = r, best_n = piece.n;
+    }
+  }
+  if (best == ~0u) {
+    return wheel;
+  }
+  // Its centre (of its extent) and axis (the direction it is thinnest in: the smallest eigenvector of its spread).
+  const Piece& piece = pieces[best];
+  double mean[3] = {0.0, 0.0, 0.0}, cov[3][3] = {};
+  for (uint32_t i = 0; i < count; ++i) {
+    if (root(i) == best) {
+      wheel.vertices.push_back(i);
+      for (int k = 0; k < 3; ++k) {
+        mean[k] += at(i)[k];
+      }
+    }
+  }
+  for (int k = 0; k < 3; ++k) {
+    mean[k] /= double(wheel.vertices.size());
+    wheel.hub[k] = 0.5f * (piece.low[k] + piece.high[k]);
+  }
+  for (const uint32_t i : wheel.vertices) {
+    for (int r = 0; r < 3; ++r) {
+      for (int k = 0; k < 3; ++k) {
+        cov[r][k] += (at(i)[r] - mean[r]) * (at(i)[k] - mean[k]);
+      }
+    }
+  }
+  const double trace = cov[0][0] + cov[1][1] + cov[2][2];
+  double a[3] = {0.3, 0.5, 0.8};
+  for (int it = 0; it < 64; ++it) {  // the largest of (trace - cov): cov's smallest
+    double n[3];
+    for (int r = 0; r < 3; ++r) {
+      n[r] = trace * a[r] - (cov[r][0] * a[0] + cov[r][1] * a[1] + cov[r][2] * a[2]);
+    }
+    const double l = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+    for (int r = 0; r < 3; ++r) {
+      a[r] = n[r] / std::max(l, 1e-30);
+    }
+  }
+  if (a[2] < 0.0) {  // along the column, toward the dashboard (forward)
+    a[0] = -a[0], a[1] = -a[1], a[2] = -a[2];
+  }
+  if (a[2] < 0.4) {  // a column leans forward; flat discs facing up (lamps, the gear knob's top) are not wheels
+    wheel.vertices.clear();
+    return wheel;
+  }
+  for (int k = 0; k < 3; ++k) {
+    wheel.axis[k] = float(a[k]);
+  }
+  wheel.found = true;
+  return wheel;
+}
+
+bool NoteCockpitCar(const double* world, double state, uint64_t mesh_key) {
+  if (!g_cockpit_view || g_cockpit_car.meshes.size() >= 128) {
+    return false;
+  }
+  for (int i = 0; i < g_cockpit_car.count; ++i) {
+    const double* p = g_cockpit_car.states[i];
+    if (p[0] == state && std::fabs(world[3] - p[1]) < 0.01 && std::fabs(world[7] - p[2]) < 0.01 &&
+        std::fabs(world[11] - p[3]) < 0.01) {
+      g_cockpit_car.meshes.push_back(mesh_key);
+      return true;
+    }
+  }
+  return false;
+}
+
+void PublishCockpitCar() {
+#ifdef _WIN32
+  SteeringFrame(g_cockpit_car.meshes);
+  if (g_cockpit_car.meshes.size() >= 4) {
+    std::vector<uint64_t>& meshes = g_cockpit_car.meshes;
+    std::sort(meshes.begin(), meshes.end());
+    meshes.erase(std::unique(meshes.begin(), meshes.end()), meshes.end());
+    uint64_t model = 1469598103934665603ull;
+    for (const uint64_t k : meshes) {
+      model = (model ^ k) * 1099511628211ull;
+    }
+    SetEnvironmentVariableA("XERENGE_VR_CARMODEL", fmt::format("{:016X}", model).c_str());
+  }
+  g_cockpit_car.meshes.clear();
+  g_cockpit_car.count = 0;
+  char text[256] = {};
+  if (g_cockpit_view && GetEnvironmentVariableA("XERENGE_VR_CAR0", text, sizeof(text)) > 0) {
+    const char* at = text;
+    int used = 0;
+    double* p = g_cockpit_car.states[0];
+    while (g_cockpit_car.count < 4 &&
+           std::sscanf(at, "%lf %lf %lf %lf%n", &p[0], &p[1], &p[2], &p[3], &used) == 4) {
+      at += used;
+      p = g_cockpit_car.states[++g_cockpit_car.count];
+      if (g_cockpit_car.count >= 4) {
+        break;
+      }
+    }
   }
 #endif
 }
@@ -453,7 +744,92 @@ struct Interpolation {
   float track_w = 0.f, track[4]{};  // development: the nearest moving draw's origin on screen (XERENGE_VR_INTERPTRACK)
   double sample[16]{};
 } g_interpolation;
+
 }  // namespace
+
+// The player's car's windows in the cockpit: the cars' glass shader, its origin within 2 m of the car's place in one of
+// the last few logic states (as burnout_vr.cpp has it) - the windscreen on the body's matrix, the side windows on the doors'
+// (their origins at the hinges: matched to the body's alone they stayed - Matt 2026-11-01: "this broke the window
+// hiding"). By depth (0-3 m ahead of the eye) they came and went: the body's origin is beside the eye and level with it,
+// and a nod took it behind ("sometimes its still flickery"); and other cars beside lost theirs.
+bool CockpitWheelMesh(uint64_t mesh_key) {
+  if (!g_cockpit_view) {
+    return false;
+  }
+  std::scoped_lock lock{g_steering.mutex};
+  if (!g_steering.car_meshes.count(mesh_key)) {
+    return false;
+  }
+  const auto found = g_steering.wheels.find(mesh_key);
+  return found == g_steering.wheels.end() || found->second.found;
+}
+
+void TurnCockpitWheel(uint64_t mesh_key, float* v, uint32_t count, uint32_t stride, uint32_t pos, uint32_t prim) {
+  std::scoped_lock lock{g_steering.mutex};
+  auto found = g_steering.wheels.find(mesh_key);
+  if (found == g_steering.wheels.end()) {
+    found = g_steering.wheels.emplace(mesh_key, FindSteeringWheel(v, count, stride, pos, prim)).first;
+    if (found->second.found) {
+      REXLOG_INFO("VR cockpit: the steering wheel in mesh {:016X}: {} vertices of {}, hub {:.3f} {:.3f} {:.3f}, axis "
+                  "{:.3f} {:.3f} {:.3f}", mesh_key, found->second.vertices.size(), count, found->second.hub[0],
+                  found->second.hub[1], found->second.hub[2], found->second.axis[0], found->second.axis[1],
+                  found->second.axis[2]);
+    }
+  }
+  const SteeringWheel& wheel = found->second;
+  if (!wheel.found || wheel.vertices.back() >= count) {
+    return;
+  }
+  // Rodrigues: about the axis through the hub.
+  static const float ratio = [] {  // development: XERENGE_VR_WHEEL_RATIO
+    const char* v = std::getenv("XERENGE_VR_WHEEL_RATIO");
+    return v ? float(std::atof(v)) : kWheelRatio;
+  }();
+  // Its sign: steering left (the front wheels' angle negative), the wheel's top goes left - about the column pointing
+  // forward, a positive turn (simulator, full left lock at ratio 4: turned the other way first).
+  const float t = g_steering.angle * ratio, c = std::cos(t), s = std::sin(t);
+  const float* k = wheel.axis;
+  for (const uint32_t i : wheel.vertices) {
+    float* p = v + size_t(i) * stride + pos;
+    const float d[3] = {p[0] - wheel.hub[0], p[1] - wheel.hub[1], p[2] - wheel.hub[2]};
+    const float kd = k[0] * d[0] + k[1] * d[1] + k[2] * d[2];
+    const float x[3] = {k[1] * d[2] - k[2] * d[1], k[2] * d[0] - k[0] * d[2], k[0] * d[1] - k[1] * d[0]};
+    for (int r = 0; r < 3; ++r) {
+      p[r] = wheel.hub[r] + d[r] * c + x[r] * s + k[r] * kd * (1.f - c);
+    }
+  }
+}
+
+bool CockpitGlass(uint64_t ps_hash, const float* c) {
+  constexpr uint64_t kGlassPs = 0x521C4D9D5E6CC77Aull;  // the cars' windows (found by leaving it out in the cockpit)
+  if (ps_hash != kGlassPs || !Stereo() || !g_cockpit_view) {
+    return false;
+  }
+  Interpolation& vi = g_interpolation;
+  std::scoped_lock lock{vi.mutex};
+  if (!vi.have_vp) {
+    return false;
+  }
+  double world[16];
+  WorldOf(vi.vp, vi.xyw_inverse, c, world);
+  bool own = false;
+  for (int i = 0; i < g_cockpit_car.count && !own; ++i) {
+    const double* p = g_cockpit_car.states[i];
+    const double dx = world[3] - p[1], dy = world[7] - p[2], dz = world[11] - p[3];
+    own = dx * dx + dy * dy + dz * dz < 2.0 * 2.0;
+  }
+  if (static const bool check = std::getenv("XERENGE_VR_CARCHECK") != nullptr; check) {  // development
+    static uint32_t seen = 0, left_out = 0, by_depth = 0;
+    ++seen;
+    left_out += own;
+    by_depth += c[15] > 0.f && c[15] < 3.f;
+    if (seen % 600 == 0) {
+      REXLOG_INFO("VR glasscheck: {} glass draws, {} the car's (left out), {} by the depth before", seen, left_out,
+                  by_depth);
+    }
+  }
+  return own;
+}
 
 bool g_marker_run = true;  // the frame's 2D draws so far are all markers (BeginFrame)
 bool g_marker_started = false;  // and the first of them was a triangle
@@ -506,7 +882,10 @@ void PlaceMarker(float* c, const float* centre) {
         !(std::getenv("XERENGE_VR_MARKER_CAMERA") && std::getenv("XERENGE_VR_MARKER_CAMERA")[0] == '0');
     if (recamera && frame.cameras) {
       const float* sigma = ViewSigns() + 3;
-      const float* from = frame.logic_camera;
+      // In the cockpit the game's own camera (burnout_vr.cpp FrameMarkerCamera), not the pinned one.
+      static const bool game_camera =  // development: XERENGE_VR_MARKER_GAMECAM=0, not
+          !(std::getenv("XERENGE_VR_MARKER_GAMECAM") && std::getenv("XERENGE_VR_MARKER_GAMECAM")[0] == '0');
+      const float* from = game_camera && frame.marker_camera_set ? frame.marker_camera : frame.logic_camera;
       const float* to = frame.drawn_camera;
       float world[3];
       for (int k = 0; k < 3; ++k) {
@@ -620,6 +999,7 @@ bool InterpolateDraw(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uin
     }
     vi.track_w = 0.f;
     vi.serial = frame.serial;
+    PublishCockpitCar();
     vi.body_motion.clear();
     vi.counters.clear();
     if (!vi.carriers.empty()) {
@@ -679,12 +1059,36 @@ bool InterpolateDraw(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uin
   // Drawn about the camera (its origin at the eye: w 0 there - vs FDA2FB150FC94348, 495AAFB282D2A23E in Angel Valley):
   // its "world" is the camera's place, and blended between two steps it moved by the camera's travel, up to 2.4 m a
   // step with the car parked, and the parts drawn over it came and went (Matt 2026-10-31: wobbling cars, missing
-  // wheels). Drawn as it is.
-  if (c[15] < 0.5f) {
+  // wheels). Drawn as it is. In the cockpit the player car's own origin is beside the eye, w about 0 to 1 m (or behind
+  // it): left out by w < 0.5 the body was drawn as it is while the parts on other matrices were blended, 25-45 cm apart
+  // (Matt 2026-11-01: "the whole front of the car detaches and glitches forwards and backwards"). There only the
+  // camera's own are left out: their origin at the eye, clip x, y and w all 0 - a part merely level with the eye (w
+  // within 5 cm, beside it) was drawn as it is among its blended neighbours, and flickered (Matt 2026-11-01: "even
+  // close parts of the car").
+  const bool at_eye = std::fabs(c[15]) < 1e-3f && std::fabs(c[3]) < 1e-3f && std::fabs(c[7]) < 1e-3f;
+  if (static const bool check = std::getenv("XERENGE_VR_CARCHECK") != nullptr; check && g_cockpit_view) {
+    static uint64_t serial = 0;  // development: draws left out by this, and those within 5 cm of level (before)
+    static uint32_t out = 0, level = 0;
+    if (serial != frame.serial) {
+      if (serial % 60 == 0 && (out || level)) {
+        REXLOG_INFO("VR eyecheck: frame {}: {} at the eye left out, {} level with it (left out before)", serial, out,
+                    level);
+      }
+      serial = frame.serial;
+      out = level = 0;
+    }
+    out += at_eye;
+    level += std::fabs(c[15]) < 0.05f;
+  }
+  if (g_cockpit_view ? at_eye : c[15] < 0.5f) {
     return false;
   }
   double world[16];
   WorldOf(vi.vp, vi.xyw_inverse, c, world);
+  const bool on_car = NoteCockpitCar(world, vi.state, mesh_key);
+  if (g_cockpit_view) {
+    NoteSteering(world, on_car, centre);
+  }
   ++vi.draws;
   const auto note_object = [&](const float* m) {  // its origin where it is drawn (the markers' cars)
     if (m[15] > 1.f && vi.objects.size() < 4096) {
@@ -820,6 +1224,8 @@ bool InterpolateDraw(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uin
     int told = 0;
     uint32_t groups_checked = 0, split = 0;
     double worst = 0.0, worst_w = 0.0;
+    double near_lo[3] = {1e9, 1e9, 1e9}, near_hi[3] = {-1e9, -1e9, -1e9};  // draws within 4 m: their shifts
+    std::string near_list;
   };
   static GroupTally groups;
   if (check && groups.serial != frame.serial) {
@@ -828,6 +1234,16 @@ bool InterpolateDraw(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uin
                   "{:.1f} m", groups.serial, frame.t, groups.groups_checked, groups.split, groups.worst * 1000.0,
                   groups.worst_w);
     }
+    if (!groups.near_list.empty()) {
+      REXLOG_INFO("VR nearcheck: frame {} t {:.2f}: spread {:.0f} {:.0f} {:.0f} mm;{}", groups.serial, frame.t,
+                  (groups.near_hi[0] - groups.near_lo[0]) * 1000.0, (groups.near_hi[1] - groups.near_lo[1]) * 1000.0,
+                  (groups.near_hi[2] - groups.near_lo[2]) * 1000.0, groups.serial % 20 == 0 ? groups.near_list : "");
+    }
+    for (int k = 0; k < 3; ++k) {
+      groups.near_lo[k] = 1e9;
+      groups.near_hi[k] = -1e9;
+    }
+    groups.near_list.clear();
     groups.first.clear();
     groups.who.clear();
     groups.serial = frame.serial;
@@ -844,6 +1260,14 @@ bool InterpolateDraw(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uin
     }
     const double shift[3] = {drawn ? drawn[3] - world[3] : 0.0, drawn ? drawn[7] - world[7] : 0.0,
                              drawn ? drawn[11] - world[11] : 0.0};
+    if (c[15] < 4.f) {
+      for (int k = 0; k < 3; ++k) {
+        groups.near_lo[k] = std::min(groups.near_lo[k], shift[k]);
+        groups.near_hi[k] = std::max(groups.near_hi[k], shift[k]);
+      }
+      groups.near_list += fmt::format(" {:04X}{}{}:{:.0f},{:.0f},{:.0f}", uint32_t(mesh_key & 0xFFFF), path,
+                                 sure ? "s" : from ? "u" : "-", shift[0] * 1000.0, shift[1] * 1000.0, shift[2] * 1000.0);
+    }
     const auto [it, added] = groups.first.try_emplace(h, std::array<double, 4>{shift[0], shift[1], shift[2], c[15]});
     const std::string me = fmt::format("{:016X} {}{} ({:.0f} {:.0f} {:.0f} mm) centre {}", mesh_key, path,
                                        sure ? "s" : from ? "u" : "-", shift[0] * 1000.0, shift[1] * 1000.0,

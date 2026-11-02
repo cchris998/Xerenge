@@ -52,6 +52,7 @@ extern "C" void __imp__sub_8259C328(PPCContext& __restrict, uint8_t*);
 extern "C" void __imp__sub_8259C400(PPCContext& __restrict, uint8_t*);
 
 namespace vr = rex::ui::vulkan::vr;
+bool XerengeLogicClock(double& state_steps, double& real_steps);
 
 namespace {
 
@@ -67,11 +68,39 @@ std::atomic<float> g_seat[3] = {0.f, 0.f, 0.f};
 constexpr float kSeatSpeed[3] = {0.25f, 0.25f, 1.f};
 constexpr float kSeatRange[3] = {2.f, 2.f, 8.f};
 
+// The cockpit view, C toggles it (kept in xerenge.conf as vr_cockpit): the camera pinned in the player's car, facing its
+// way (PinCamera), with a seat of its own (vr_cockpit_offset, in the car's axes from the car's origin) - the chase
+// view's vr_offset is kept for it. g_seat is the view's in use. It comes on once the race has started (PinCamera: the
+// GO), and while the game's camera is its chase camera: car selection, the race's introduction, the countdown and the
+// game's own shots (takedowns, crashes) are the game's (Matt 2026-11-01).
+std::atomic<bool> g_cockpit{false};      // the setting
+std::atomic<bool> g_race_on{false};      // the race started (its GO)
+std::atomic<bool> g_chase_view{false};   // the game's camera its chase camera
+std::atomic<bool> g_cockpit_now{false};  // the view in use: both
+// The driver's seat from the car's origin (x right, y up, z back), Matt's, set in the headset (2026-11-01).
+constexpr const char* kCockpitSeat = "-0.350 0.722 0.000";
+
 void PublishSeat();
+
+// The player's car's model in the cockpit (plume_vr.cpp, XERENGE_VR_CARMODEL; 0 before it is known): each has its own
+// cockpit seat, vr_cockpit_offset_<model> - the cars' cabins are different heights (Matt 2026-11-01: "we need to store
+// the user offset per car"). A car without one starts from vr_cockpit_offset, then kCockpitSeat.
+std::atomic<uint64_t> g_car_model{0};
+
+std::string SeatKey() {
+  if (!g_cockpit_now.load(std::memory_order_relaxed)) {
+    return "vr_offset";
+  }
+  const uint64_t model = g_car_model.load(std::memory_order_relaxed);
+  return model ? fmt::format("vr_cockpit_offset_{:016X}", model) : std::string("vr_cockpit_offset");
+}
 
 void LoadSeat() {
   float x = 0.f, y = 0.f, z = 0.f;
-  if (std::sscanf(xerenge::settings::ConfString("vr_offset", "0 0 0").c_str(), "%f %f %f", &x, &y, &z) == 3) {
+  const std::string fallback = !g_cockpit_now.load() ? std::string("0 0 0")
+                               : g_car_model.load() ? xerenge::settings::ConfString("vr_cockpit_offset", kCockpitSeat)
+                                                    : std::string(kCockpitSeat);
+  if (std::sscanf(xerenge::settings::ConfString(SeatKey(), fallback).c_str(), "%f %f %f", &x, &y, &z) == 3) {
     g_seat[0] = std::clamp(x, -kSeatRange[0], kSeatRange[0]);
     g_seat[1] = std::clamp(y, -kSeatRange[1], kSeatRange[1]);
     g_seat[2] = std::clamp(z, -kSeatRange[2], kSeatRange[2]);
@@ -79,15 +108,218 @@ void LoadSeat() {
   PublishSeat();
 }
 
-// The seat for plume (plume_vr.cpp TurnViewSpaceDraw): the process's environment, which both modules see.
-void PublishSeat() {
+// plume_vr.cpp CockpitGlass and NoteCockpitCar see it as XERENGE_VR_SEAT's fourth number.
+bool InCockpit() { return g_cockpit_now.load(std::memory_order_relaxed); }
+
+// The view in use from the setting and the race; on a change, its seat.
+void UpdateView() {
+  const bool now = g_cockpit.load() && g_race_on.load() && g_chase_view.load();
+  if (g_cockpit_now.exchange(now) != now) {
+    LoadSeat();
+    REXLOG_INFO("VR: the {} camera (race {}, game's camera {})", now ? "cockpit" : "game's", g_race_on.load() ? "on" : "off",
+                g_chase_view.load() ? "chase" : "its own");
+  }
+}
+
+float LoadFloat(const uint8_t* base, uint32_t address);
+void StoreFloat(uint8_t* base, uint32_t address, float value);
+
+// The cockpit's camera pinned to the car (Matt 2026-11-01: "we need the camera to actually be pinned inside the
+// vehicle"): the chase camera swings round the car on a spring, and moved inside it went through the bodywork. The car's
+// matrix (right, up, at, pos, 16 bytes apart) is the first of the game's car table, a global in the image: the matrix the
+// body is drawn with. The car's physics matrix (0x82B554E0) is another, but the body is drawn ahead of it by its speed -
+// 22 cm at 36 m/s, 42 cm at 55 m/s - and pinned to that the view slid back through the car accelerating and forward
+// braking (Matt: "We need to be pinned depth too").
+constexpr uint32_t kPlayerCarMatrix = 0x82CE0040u;
+constexpr uint32_t kRaceRunning = 0x82846B80u;  // 1 from the race's GO, 0 before it and while paused
+
+struct Pin {
+  std::mutex mutex;
+  bool have_relative = false;  // the camera's axes in the car's (rows 0-2), snapped to the car's: -1, 0 or 1 each
+  float relative[3][3]{};
+  float last_pos[3]{};
+  // The game's own (chase) camera for each pinned one lately: it projects the race's markers with it (FrameMarkerCamera).
+  std::array<std::array<float, 24>, 32> cameras{};  // pinned rows right, up, at, pos, then the game's
+  size_t next_camera = 0;
+  bool have_car = false;  // the car there the update before
+  int chase_updates = 0;  // updates in a row the game's camera has been its chase camera
+  uint64_t model_seen = 0;  // the car's model (plume), and for how many steps the same
+  int model_steps = 0;
+} g_pin;
+
+void ReadCar(const uint8_t* base, uint32_t matrix, float (&car)[4][3]) {
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 3; ++c) {
+      car[r][c] = LoadFloat(base, matrix + 16 * r + 4 * c);
+    }
+  }
+}
+
+// The camera's new matrix (on CGtViewport::Update's stack) put at the car's origin, facing the car's way: its axes the
+// car's, matched to the chase camera's (which roughly faces the car's way) the first step. The seat (PoseRwMatrix) then
+// moves it to the driver's place in those axes.
+void PinCamera(uint8_t* base, uint32_t m) {
+  std::scoped_lock lock{g_pin.mutex};
+  float car[4][3];
+  ReadCar(base, kPlayerCarMatrix, car);
+  const float at2 = car[2][0] * car[2][0] + car[2][1] * car[2][1] + car[2][2] * car[2][2];
+  const float jx = car[3][0] - g_pin.last_pos[0], jy = car[3][1] - g_pin.last_pos[1], jz = car[3][2] - g_pin.last_pos[2];
+  // No car (a menu), or it jumped more than 50 m in a step (a new race, a restart): the race not on till the game
+  // starts it (its race-running flag, 1 from the GO - 0 through the introduction and the countdown, and while paused,
+  // which keeps the cockpit), and the car's model taken again.
+  const bool have_car = std::fabs(at2 - 1.f) < 0.05f;
+  if (!have_car || !g_pin.have_car || !(jx * jx + jy * jy + jz * jz < 50.f * 50.f)) {
+    g_race_on = false;
+    g_pin.have_relative = false;
+    g_pin.model_steps = 0;
 #ifdef _WIN32
-  SetEnvironmentVariableA("XERENGE_VR_SEAT", fmt::format("{:.4f} {:.4f} {:.4f}", g_seat[0].load(), g_seat[1].load(),
-                                                         g_seat[2].load()).c_str());
+    SetEnvironmentVariableA("XERENGE_VR_CARMODEL", nullptr);  // the last race's car's
+#endif
+  }
+  g_pin.have_car = have_car;
+  if (have_car && xerenge::LoadGuestU32(base, kRaceRunning) == 1) {
+    g_race_on = true;
+  }
+  // The game's camera its usual chase camera (1.18 m up and 4.6 m behind the car, looking its way; the spring swings it
+  // half a metre aside) for 5 updates: the countdown's shots, a takedown's and a crash's are the game's own (Matt
+  // 2026-11-01: "the camera usually zooms to the crashed car, we should respect that").
+  {
+    float game[4][3];
+    ReadCar(base, m, game);
+    const float d[3] = {game[3][0] - car[3][0], game[3][1] - car[3][1], game[3][2] - car[3][2]};
+    const auto along = [&](const float* v, int k) { return v[0] * car[k][0] + v[1] * car[k][1] + v[2] * car[k][2]; };
+    const float x = along(d, 0), y = along(d, 1), z = along(d, 2);
+    const bool chase = std::fabs(x) < 1.5f && y > 0.5f && y < 2.2f && z > -7.f && z < -3.f && along(game[2], 2) > 0.9f;
+    g_pin.chase_updates = chase ? std::min(g_pin.chase_updates + 1, 5) : 0;
+    g_chase_view = g_pin.chase_updates >= 5;
+  }
+  std::memcpy(g_pin.last_pos, car[3], sizeof(g_pin.last_pos));
+  UpdateView();
+#ifdef _WIN32
+  // The car's place for the last few logic states, for plume's model of it (plume_vr.cpp NoteCockpitCar).
+  if (double state, real; InCockpit() && XerengeLogicClock(state, real)) {
+    static std::array<std::array<double, 4>, 4> places{};
+    if (places[0][0] != state) {
+      std::rotate(places.rbegin(), places.rbegin() + 1, places.rend());
+      places[0] = {state, car[3][0], car[3][1], car[3][2]};
+      std::string text;
+      for (const auto& p : places) {
+        text += fmt::format("{:.0f} {:.4f} {:.4f} {:.4f} ", p[0], p[1], p[2], p[3]);
+      }
+      SetEnvironmentVariableA("XERENGE_VR_CAR0", text.c_str());
+    }
+  }
+#endif
+  if (!InCockpit()) {
+    g_pin.have_relative = false;
+    return;
+  }
+  // The car's model taken once it holds for half a second at the start (a part knocked off later changes the meshes
+  // drawn with the body: kept till the next race), its seat loaded.
+#ifdef _WIN32
+  if (g_pin.model_steps < 30) {
+    char text[32] = {};
+    const uint64_t model = GetEnvironmentVariableA("XERENGE_VR_CARMODEL", text, sizeof(text)) > 0
+                               ? std::strtoull(text, nullptr, 16)
+                               : 0;
+    g_pin.model_steps = model && model == g_pin.model_seen ? g_pin.model_steps + 1 : 0;
+    g_pin.model_seen = model;
+    if (g_pin.model_steps == 30 && model != g_car_model.load()) {
+      g_car_model = model;
+      LoadSeat();
+      REXLOG_INFO("VR cockpit: car {:016X}, seat {:.3f} {:.3f} {:.3f}", model, g_seat[0].load(), g_seat[1].load(),
+                  g_seat[2].load());
+    }
+  }
+#endif
+  float cam[4][3];
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 3; ++c) {
+      cam[r][c] = LoadFloat(base, m + 16 * r + 4 * c);
+    }
+  }
+  const auto dot = [](const float* a, const float* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
+  if (!g_pin.have_relative) {
+    // Each camera axis the car axis nearest it; taken when each is clearly one (the chase camera within ~35 degrees of
+    // the car's way), and they make a turn, not a mirror.
+    bool clear = true;
+    for (int r = 0; r < 3; ++r) {
+      int nearest = 0;
+      float best = 0.f;
+      for (int k = 0; k < 3; ++k) {
+        const float d = dot(cam[r], car[k]);
+        if (std::fabs(d) > std::fabs(best)) {
+          best = d;
+          nearest = k;
+        }
+      }
+      clear = clear && std::fabs(best) > 0.8f;
+      for (int k = 0; k < 3; ++k) {
+        g_pin.relative[r][k] = k == nearest ? (best < 0.f ? -1.f : 1.f) : 0.f;
+      }
+    }
+    const float(&q)[3][3] = g_pin.relative;
+    const float det = q[0][0] * (q[1][1] * q[2][2] - q[1][2] * q[2][1]) -
+                      q[0][1] * (q[1][0] * q[2][2] - q[1][2] * q[2][0]) +
+                      q[0][2] * (q[1][0] * q[2][1] - q[1][1] * q[2][0]);
+    if (!clear || std::fabs(det) < 0.5f) {
+      return;
+    }
+    g_pin.have_relative = true;
+  }
+  std::array<float, 24> pair;
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 3; ++c) {
+      float v = r == 3 ? car[3][c] : 0.f;
+      for (int k = 0; k < 3 && r < 3; ++k) {
+        v += g_pin.relative[r][k] * car[k][c];
+      }
+      StoreFloat(base, m + 16 * r + 4 * c, v);
+      pair[r * 3 + c] = v;
+      pair[12 + r * 3 + c] = cam[r][c];
+    }
+  }
+  // Kept once each (the camera is updated more often than the logic steps, and the frame drawn is a step or two old).
+  const auto& last = g_pin.cameras[(g_pin.next_camera + g_pin.cameras.size() - 1) % g_pin.cameras.size()];
+  if (std::memcmp(last.data(), pair.data(), 12 * sizeof(float)) != 0) {
+    g_pin.cameras[g_pin.next_camera] = pair;
+    g_pin.next_camera = (g_pin.next_camera + 1) % g_pin.cameras.size();
+  }
+}
+
+// The frame's cameras taken (the renderer's read): in the cockpit, the game's own camera for the frame's pinned one
+// (`logic`, rows right, up, at, pos), for plume as XERENGE_VR_MARKERCAM - read on this thread when the frame ends
+// (plume_vr.cpp TakeBuiltFrame). The game projects the race's markers with its chase camera, and turned to the pinned
+// one they sat low and swung with its spring (Matt 2026-11-01: "HUD markers are very jumpy when in cockpit view").
+void FrameMarkerCamera(const float (&logic)[12]) {
+#ifdef _WIN32
+  std::scoped_lock lock{g_pin.mutex};
+  for (const auto& c : g_pin.cameras) {
+    if (InCockpit() && std::memcmp(c.data(), logic, sizeof(logic)) == 0) {
+      std::string text;
+      for (int i = 12; i < 24; ++i) {
+        text += fmt::format("{:.6f} ", c[i]);
+      }
+      SetEnvironmentVariableA("XERENGE_VR_MARKERCAM", text.c_str());
+      return;
+    }
+  }
+  if (static int missed = 0; InCockpit() && std::getenv("XERENGE_VR_CARCHECK") && ++missed % 60 == 1) {  // development
+    REXLOG_INFO("VR markers: the frame's camera not among the pinned ones ({} times)", missed);
+  }
+  SetEnvironmentVariableA("XERENGE_VR_MARKERCAM", nullptr);
 #endif
 }
 
-// Once a game frame: the keys held move the seat (kSeatSpeed); let go, it is saved.
+// The seat for plume (plume_vr.cpp TurnViewSpaceDraw): the process's environment, which both modules see.
+void PublishSeat() {
+#ifdef _WIN32
+  SetEnvironmentVariableA("XERENGE_VR_SEAT", fmt::format("{:.4f} {:.4f} {:.4f} {}", g_seat[0].load(), g_seat[1].load(),
+                                                         g_seat[2].load(), InCockpit() ? 1 : 0).c_str());
+#endif
+}
+
+// Once a game frame: the keys held move the seat (kSeatSpeed); let go, it is saved. C changes view.
 void MoveSeat() {
 #ifdef _WIN32
   static auto last = std::chrono::steady_clock::now();
@@ -104,6 +336,15 @@ void MoveSeat() {
     move[0] = (held(VK_RIGHT) ? 1.f : 0.f) - (held(VK_LEFT) ? 1.f : 0.f);
     const float up_down = (held(VK_UP) ? 1.f : 0.f) - (held(VK_DOWN) ? 1.f : 0.f);
     (ctrl ? move[2] : move[1]) = ctrl ? -up_down : up_down;  // forward is -z
+    static bool c_was = true;  // a press counts once C has been seen up
+    const bool c = held('C');
+    if (c && !c_was) {
+      g_cockpit = !g_cockpit.load();
+      xerenge::settings::SetConfString("vr_cockpit", g_cockpit.load() ? "1" : "0");
+      UpdateView();
+      REXLOG_INFO("VR: {} view", g_cockpit.load() ? "cockpit" : "chase");
+    }
+    c_was = c;
   }
   const bool any = move[0] != 0.f || move[1] != 0.f || move[2] != 0.f;
   for (int k = 0; k < 3 && any; ++k) {
@@ -114,7 +355,7 @@ void MoveSeat() {
   }
   if (moving && !any) {
     xerenge::settings::SetConfString(
-        "vr_offset", fmt::format("{:.3f} {:.3f} {:.3f}", g_seat[0].load(), g_seat[1].load(), g_seat[2].load()));
+        SeatKey(), fmt::format("{:.3f} {:.3f} {:.3f}", g_seat[0].load(), g_seat[1].load(), g_seat[2].load()));
     REXLOG_INFO("VR: seat offset {:.3f} {:.3f} {:.3f} m", g_seat[0].load(), g_seat[1].load(), g_seat[2].load());
   }
   moving = any;
@@ -178,6 +419,7 @@ void ConfigureAtStart(rex::RuntimeConfig& config) {
     return;
   }
   rex::cvar::SetFlagByName("vr", "true");
+  g_cockpit = xerenge::settings::ConfString("vr_cockpit", "0") == "1";
   LoadSeat();
   // The pad while another window has the focus (SteamVR's VR View being recorded, Matt 2026-11-01: input stopped):
   // SDL's controller events reach an unfocused window only with this; in the headset the desktop's focus means nothing.
@@ -697,6 +939,7 @@ REX_HOOK_RAW(sub_820FBE60) {
   if (lr == kViewportUpdateMatrixCaller) {
     g_camera_frame.store(ctx.r3.u32, std::memory_order_relaxed);
     if (vr::Active()) {
+      PinCamera(base, ctx.r1.u32 + 80);  // in the cockpit, where it sits in the car
       NoteCameraState(base, ctx.r1.u32 + 80);  // the new matrix, on CGtViewport::Update's stack
 #ifdef _WIN32
       if (static const bool watch = std::getenv("XERENGE_VR_WATCH_CAMERA") != nullptr; watch) {  // development
@@ -782,6 +1025,7 @@ REX_HOOK_RAW(sub_820FBE60) {
           drawn_camera[i] = LoadFloat(base, copy + 16 * (i / 3) + 4 * (i % 3));
         }
         vr::NoteFrameCameras(logic_camera, drawn_camera);  // the race's markers (plume_vr.cpp PlaceMarker)
+        FrameMarkerCamera(logic_camera);
         std::memcpy(interpolated, xerenge::GuestPointer(base, copy), 128);
       } else {
         std::memcpy(xerenge::GuestPointer(base, copy), interpolated, 128);
@@ -829,6 +1073,12 @@ REX_HOOK_RAW(sub_8234ABC0) {
     StoreFloat(base, window + 0, t_tangents[1]);
     StoreFloat(base, window + 4, t_tangents[2]);
     vr::SetFramePose(t_pose, t_tangents);
+    // In the cockpit view (C) the near plane from 0.5 m (RwCamera +112, far +116) to
+    // 5 cm: the roof and pillars, inches from the eyes, were cut away (Matt 2026-11-01: "Make the ceiling not cull out
+    // too close to the camera").
+    if (InCockpit()) {
+      StoreFloat(base, ctx.r3.u32 + 112, 0.05f);
+    }
   }
   __imp__sub_8234ABC0(ctx, base);
 }

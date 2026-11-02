@@ -4510,6 +4510,11 @@ uint32_t PlumeDrawContext::FillVertices(const GuestDrawSnapshot& snap, memory::M
       vs_info ? (passthrough ? vs_info->passthrough_pos_fetch_const : vs_info->real_pos_fetch_const)
               : -1;
 
+  // VR fork: the player car's mesh with its steering wheel in the cockpit, turned as it is unpacked (plume_vr.cpp) - not
+  // finished ahead or cached.
+  const uint64_t wheel_key =
+      (snap.vs_hash * 0x9E3779B97F4A7C15ull ^ snap.ps_hash) * 31 + (uint64_t(snap.prim_type) << 32 | snap.num_indices);
+  const bool wheel = !passthrough && vr::CockpitWheelMesh(wheel_key);
   // Unpacked already, on a worker thread, before the frame was encoded?
   const PreUnpacked* pre = nullptr;
   // Or finished there as well, and already where it is drawn from (FinishAhead)?
@@ -4531,6 +4536,9 @@ uint32_t PlumeDrawContext::FillVertices(const GuestDrawSnapshot& snap, memory::M
   if (pre) {
     last_fill_kind_ = 2;
   }
+  if (wheel) {
+    finished = nullptr;
+  }
 
   // The vertex cache: see cache_vb_ and CheckMeshCache.
   last_fill_cache_offset_ = ~0u;
@@ -4541,7 +4549,7 @@ uint32_t PlumeDrawContext::FillVertices(const GuestDrawSnapshot& snap, memory::M
   uint64_t index_hash = 0;
   // Cached vertices are kept in the layout of the title's own pipeline for the
   // shader; a draw falling back to another pipeline neither stores nor uses them.
-  if (!passthrough && memory && fill_layout_mask_ == TitleVertexLayout(snap.vs_hash)) {
+  if (!passthrough && !wheel && memory && fill_layout_mask_ == TitleVertexLayout(snap.vs_hash)) {
     MeshCheck check;
     if (auto found = mesh_checks_.find(&snap); found != mesh_checks_.end()) {
       check = found->second;
@@ -4765,6 +4773,9 @@ uint32_t PlumeDrawContext::FillVertices(const GuestDrawSnapshot& snap, memory::M
                    fetched, fetch_addr, fetch_type);
   }
   FillPhase(1, fill_mark);
+  if (wheel && !attrs.empty()) {
+    vr::TurnCockpitWheel(wheel_key, staged, vertex_count, kFloatsPerVert, pos_float, snap.prim_type);
+  }
   if (!attrs.empty() && pos_float + 4 <= kFloatsPerVert) {
     static const bool keep = std::getenv("XERENGE_KEEP_BAD_VERTICES") != nullptr;
     if (!keep) {
@@ -7941,6 +7952,9 @@ void PlumeDrawContext::EncodeDraws(plume::RenderCommandList* list,
     if (vr::DevDraw(snap.vs_hash, snap.ps_hash, snap.blend_control, snap.color_mask, snap.prim_type, snap.num_indices,
                     vr_hud_split)) {
       return;  // VR fork, development: SKIP
+    }
+    if (vr::CockpitGlass(snap.ps_hash, reinterpret_cast<const float*>(snap.vs_constants.data()))) {
+      return;  // VR fork: the player car's glass, seen from inside (plume_vr.cpp)
     }
     if ((vr_hud_split || vr::HudVertexShader(snap.vs_hash)) && memory && vr::DevLogging()) {  // VR fork, development
       const uint32_t addr = snap.d3d_stream_address[0], stride = snap.d3d_stream_stride[0];

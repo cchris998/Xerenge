@@ -85,6 +85,15 @@ bool InterpolateDraw(uint64_t vs_hash, uint64_t mesh_key, bool depth_tested, uin
 // Development (VR): the trigger files %TEMP%\xerenge_vr\DRAWLOG (log the next frame's draws: shaders, blend, write
 // mask, primitive and count, and whether in the HUD) and SKIP (a list of shader hashes, hex: their draws are left out
 // while it lists them). True: leave this draw out.
+// In the cockpit view (C, burnout_vr.cpp): whether this draw is the player car's glass -
+// the windscreen and side windows, an opaque dark reflection from inside (Matt 2026-11-01: "make the windscreen/side
+// windows clear") - its pixel shader the cars' glass, its origin within 3 m of the eye. Left out.
+bool CockpitGlass(uint64_t ps_hash, const float* vs_constants);
+// In the cockpit: whether a mesh is the player car's that has (or may have) its steering wheel in it - kept out of the
+// vertex cache, its vertices turned as they are unpacked (TurnCockpitWheel: positions `stride` floats apart, from `pos`).
+bool CockpitWheelMesh(uint64_t mesh_key);
+void TurnCockpitWheel(uint64_t mesh_key, float* vertices, uint32_t count, uint32_t stride, uint32_t pos, uint32_t prim);
+
 bool DevDraw(uint64_t vs_hash, uint64_t ps_hash, uint32_t blend_control, uint32_t color_mask, uint32_t prim_type,
              uint32_t count, bool hud);
 // Development: a frame ends (the draw log's frame).

@@ -154,6 +154,7 @@ struct Pin {
   bool have_relative = false;  // the camera's axes in the car's (rows 0-2), snapped to the car's: -1, 0 or 1 each
   float relative[3][3]{};
   float last_pos[3]{};
+  float last_offset[3]{};  // the game's camera from the car (world), the update before
   // The game's own (chase) camera for each pinned one lately: it projects the race's markers with it (FrameMarkerCamera).
   std::array<std::array<float, 24>, 32> cameras{};  // pinned rows right, up, at, pos, then the game's
   size_t next_camera = 0;
@@ -217,14 +218,27 @@ void PinCamera(uint8_t* base, uint32_t m) {
       return std::fabs(cx) < 1.5f && cy > 0.5f && cy < 2.2f && cz > -7.f && cz < -3.f && look > 0.9f;
     };
     bool chase = chase_at(x, y, z, along(game[2], 2));
-    if (const float fl = std::sqrt(car[2][0] * car[2][0] + car[2][2] * car[2][2]); !chase && fl > 0.3f) {
+    float look = along(game[2], 2);  // the camera's look along the car's heading (level when it can be)
+    if (const float fl = std::sqrt(car[2][0] * car[2][0] + car[2][2] * car[2][2]); fl > 0.3f) {
       const float fx = car[2][0] / fl, fz = car[2][2] / fl;  // the heading, level
-      chase = chase_at(d[0] * fz - d[2] * fx, d[1], d[0] * fx + d[2] * fz, game[2][0] * fx + game[2][2] * fz);
+      look = game[2][0] * fx + game[2][2] * fz;
+      chase = chase || chase_at(d[0] * fz - d[2] * fx, d[1], d[0] * fx + d[2] * fz, look);
     }
+    // Once the chase view, held while the game's camera moves on smoothly near the car, looking its way (Matt 2026-11-02:
+    // hitting a wall hard at a corner flicked to the chase view for a moment - the car's heading snapped round and the
+    // camera, on its spring, was outside the chase camera's place for a few updates). The game's own shots cut away (a
+    // crash's, a takedown's: metres in an update), and the results' orbit turns from the car's heading.
+    const float step = std::sqrt((d[0] - g_pin.last_offset[0]) * (d[0] - g_pin.last_offset[0]) +
+                                 (d[1] - g_pin.last_offset[1]) * (d[1] - g_pin.last_offset[1]) +
+                                 (d[2] - g_pin.last_offset[2]) * (d[2] - g_pin.last_offset[2]));
+    const float range = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    const bool held = !chase && g_chase_view && step < 1.f && range > 2.f && range < 9.f && d[1] > -0.5f && d[1] < 3.5f &&
+                      look > 0.5f;
+    std::memcpy(g_pin.last_offset, d, sizeof(g_pin.last_offset));
     // The bumper camera: 0.55 m up and 1.10 m forward, looking the car's way (a crash's shot from 1.14 up, 1 m back was
     // taken for it when looser).
     const bool bumper = std::fabs(x) < 0.5f && y > 0.2f && y < 0.9f && z > 0.5f && z < 2.f && along(game[2], 2) > 0.9f;
-    g_pin.chase_updates = chase ? std::min(g_pin.chase_updates + 1, 5) : 0;
+    g_pin.chase_updates = chase || held ? std::min(g_pin.chase_updates + 1, 5) : 0;
     if (chase && g_cockpit_coming.exchange(false)) {
       g_pin.chase_updates = 5;
     }
@@ -234,7 +248,7 @@ void PinCamera(uint8_t* base, uint32_t m) {
                      xerenge::LoadGuestU32(base, kRaceAccelerating) == 1)) {
       g_race_on = true;
     }
-    if (chase || bumper) {
+    if (chase || held || bumper) {
       g_view_seen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                            std::chrono::steady_clock::now().time_since_epoch()).count();
     }

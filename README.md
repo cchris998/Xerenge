@@ -5,10 +5,9 @@ PowerPC code is recompiled to C++ ahead of time and linked into an executable,
 with the console's hardware and operating system emulated around it. There is
 no CPU interpreter and no JIT.
 
-**Supported releases:** Burnout Revenge (Europe) and, since 0.4.7, Burnout
-Revenge (USA) - both officially, tested end to end: menus, races, Crash mode,
-replays, widescreen and the logo skip. Other dumps (the beta, other regions)
-are not.
+**Supported release:** Burnout Revenge (Europe) only - this build is compatible
+with the European ISO alone. Other dumps (the USA release, the beta, other
+regions) are not supported.
 
 ## VR (0.4.9-vr-0.1)
 
@@ -23,14 +22,6 @@ markers at their cars' depth all work in races, menus and replays.
   and **Ctrl+Up/Down** forward and back, up to 8 m (into the car from the
   chase camera; 1 m a second forward and back, 25 cm a second the others,
   while the game's window has the focus). It is kept in xerenge.conf as `vr_offset`.
-- **Cockpit view:** in a race, **Y** (the game's change-view button) now goes
-  round three views: the low bumper view, the cockpit, then the chase view. In
-  the cockpit you sit in the driver's seat: the view is fixed to the car, facing
-  its way, and its windows are clear. **C** (the game's window focused) also
-  switches between the cockpit and the chase view. The countdown and the game's
-  own shots (takedowns, crashes) keep the game's camera. The seat keys above move
-  the cockpit seat separately for each car (`vr_cockpit_offset_<car>`), so the
-  chase view keeps its own.
 - **Settings:** changing the resolution and the other VR options is done in
   the game, under **Driver Details > Graphics**: VR EYE SIZE (the per-eye
   resolution, 2560x2160 by default, up to 7680x5760), VR FRAME CAP and
@@ -40,6 +31,21 @@ markers at their cars' depth all work in races, menus and replays.
   blur can also be changed from the race's pause menu, and take effect at once. The window options (KEEP 16:9, RENDER
   RESOLUTION, ANTI-ALIASING) do not apply in VR and are hidden there.
 - **Disc:** this release carries the game built for the European disc only.
+
+### Cockpit view
+
+The cockpit view has been added to the game's list of race views. In a race,
+press **Y** (the game's change-view button) to go round them: the low bumper
+view, the cockpit, then the chase view. In the cockpit you sit in the driver's
+seat: the view is fixed to the car, its windows are clear and the steering wheel
+turns as you steer. The countdown and the game's own shots (takedowns, crashes)
+keep the game's camera. **C** (the game's window focused) also switches between
+the cockpit and the chase view.
+
+**Positioning:** the **arrow keys** move your seat left, right, up and down, and
+**Ctrl+Up/Down** move it forward and back (depth). Each car keeps its own cockpit
+seat (`vr_cockpit_offset_<car>` in xerenge.conf), and the chase view keeps its own
+(`vr_offset`).
 
 **Building the VR version.** The VR support also needs the `vr` branch of
 three forked dependencies, which `scripts/setup-sdk.sh` and
@@ -59,12 +65,10 @@ makes the stereo shader caches and, on Windows, puts the Khronos OpenXR loader
 
 ## Getting it running
 
-You need a dump of the retail European or American release - the image
-hashing to `34c1bd4d549c2c53f29d814fa5e5d1c04c533c5ca0c39e57b6c2538f44ff59b4`
-(Europe) or `7abf689f52b70666ba92052bd157cfcae9ed6290dae298fbf639baa1d169f92b`
-(USA) - and a machine with Vulkan. The two are not the same build (the
-territory is compiled into the code), so each gets a game generated from its
-own `default.xex`; SETUP.md has the detail.
+You need a dump of the retail European release - the image hashing to
+`34c1bd4d549c2c53f29d814fa5e5d1c04c533c5ca0c39e57b6c2538f44ff59b4` - and a
+machine with Vulkan. Only the European ISO is compatible; SETUP.md has the
+detail.
 
 **With the installer.** `Burnout_Revenge_Installer-x86_64.AppImage` asks for the
 disc image, the install directory and three settings (bloom, motion blur, and
@@ -75,11 +79,8 @@ applications menu entry. Nothing from the game is downloaded - it is all made
 from your disc, on your machine. The settings land in `xerenge.conf` in the
 install directory and are read at every start, so they can be changed there
 later - or in the game, under Driver Details > Settings (GRAPHICS, HACKS, DEBUG). To build the AppImage yourself: `rexglue/installer/make-appimage.sh`
-(needs Qt 6, linuxdeploy and linuxdeploy-plugin-qt). The payload carries the
-game twice, `bin/burnout_eu` and `bin/burnout_us`, and the installer installs
-the one for your disc as `bin/burnout`. CI builds the American one when its
-assets carry the American release's files (`game_us/` beside `game_eu/`); an
-installer made without them says so and installs the European disc only.
+(needs Qt 6, linuxdeploy and linuxdeploy-plugin-qt). The installer installs the
+game for the European disc as `bin/burnout`.
 
 **By hand.**
 

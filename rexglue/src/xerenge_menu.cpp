@@ -48,6 +48,7 @@ extern "C" void sub_821C7588(PPCContext& __restrict, uint8_t*);
 extern "C" void sub_821E6928(PPCContext& __restrict, uint8_t*);
 extern "C" void sub_822ADE70(PPCContext& __restrict, uint8_t*);
 bool XerengeCanRestart();
+void XerengeVrScreen(const std::string& screen);
 void XerengeRestartGame();
 
 namespace {
@@ -419,6 +420,7 @@ REX_HOOK_RAW(sub_821E6BA8) {
   if (requested) {
     static std::string on_show;
     const std::string next = GuestString(base, requested);
+    XerengeVrScreen(next);  // VR: no race markers on the screens after an event
     g_on_settings = IsSettings(next);
     g_on_main_menu = next.size() >= 14 && next.compare(next.size() - 14, 14, "/Main/MainMenu") == 0;
     constexpr uint32_t kMusic = 0x8268748C;  // the soundtrack's state; +780: paused for a video

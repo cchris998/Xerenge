@@ -787,10 +787,11 @@ bool CockpitGlass(uint64_t ps_hash, const float* c) {
 
 bool g_marker_run = true;  // the frame's 2D draws so far are all markers (BeginFrame)
 bool g_marker_started = false;  // and the first of them was a triangle
+bool g_markers_off = false;  // a screen after an event (burnout_vr.cpp XerengeVrScreen): no markers (BeginFrame)
 
 bool MarkerDraw(uint64_t vs_hash, uint64_t ps_hash, uint32_t count, const float* c) {
   static const bool off = std::getenv("XERENGE_VR_MARKERS") && std::getenv("XERENGE_VR_MARKERS")[0] == '0';
-  if (off || !Stereo() || !g_marker_run || !HudVertexShader(vs_hash)) {
+  if (off || g_markers_off || !Stereo() || !g_marker_run || !HudVertexShader(vs_hash)) {
     return false;
   }
   // The frame's first 2D draws, flat colour (the triangles, the position label's shapes), each with its car's depth
@@ -1671,6 +1672,10 @@ void BeginFrame() {
   g_split = false;
   g_marker_run = true;
   g_marker_started = false;
+#ifdef _WIN32
+  char none[4] = {};
+  g_markers_off = GetEnvironmentVariableA("XERENGE_VR_NO_MARKERS", none, sizeof(none)) > 0;
+#endif
   {
     std::scoped_lock lock{g_pose_mutex};
     if (!g_poses.empty()) {

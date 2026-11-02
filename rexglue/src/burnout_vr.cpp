@@ -193,6 +193,7 @@ void PinCamera(uint8_t* base, uint32_t m) {
     g_pin.shot_updates = 0;
 #ifdef _WIN32
     SetEnvironmentVariableA("XERENGE_VR_CARMODEL", nullptr);  // the last race's car's
+    SetEnvironmentVariableA("XERENGE_VR_NO_MARKERS", nullptr);  // the last event's results
 #endif
   }
   g_pin.have_car = have_car;
@@ -995,6 +996,16 @@ void TraceRaceCameraRotation(PPCContext& ctx, bool sine) {
 
 void XerengeSetCameraShake(double shake) {
   g_camera_shake.store(std::clamp(shake, 0.0, 1.0), std::memory_order_relaxed);
+}
+
+// The interface's screen on show (xerenge_menu.cpp): on the screens after an event (the results, the clip) no draw is a
+// race marker. Their grey panels are flat colour like the markers, and after a rival's marker drawn first they were
+// taken for markers and put in the scene: tied to the head, their text gone (Matt 2026-11-02, a race's results). For
+// plume as XERENGE_VR_NO_MARKERS; a new race clears it (PinCamera).
+void XerengeVrScreen(const std::string& screen) {
+#ifdef _WIN32
+  SetEnvironmentVariableA("XERENGE_VR_NO_MARKERS", screen.find("/PostEvent/") != std::string::npos ? "1" : nullptr);
+#endif
 }
 
 REX_HOOK_RAW(sub_8259C328) {

@@ -50,6 +50,7 @@ extern "C" void __imp__sub_820FBE60(PPCContext& __restrict, uint8_t*);
 extern "C" void __imp__sub_8234ABC0(PPCContext& __restrict, uint8_t*);
 extern "C" void __imp__sub_8259C328(PPCContext& __restrict, uint8_t*);
 extern "C" void __imp__sub_8259C400(PPCContext& __restrict, uint8_t*);
+extern "C" void __imp__sub_825AFE90(PPCContext& __restrict, uint8_t*);
 
 namespace vr = rex::ui::vulkan::vr;
 bool XerengeLogicClock(double& state_steps, double& real_steps);
@@ -68,7 +69,7 @@ std::atomic<float> g_seat[3] = {0.f, 0.f, 0.f};
 constexpr float kSeatSpeed[3] = {0.25f, 0.25f, 1.f};
 constexpr float kSeatRange[3] = {2.f, 2.f, 8.f};
 
-// The cockpit view, C toggles it (kept in xerenge.conf as vr_cockpit): the camera pinned in the player's car, facing its
+// The cockpit view, Y in a race (CycleViews) or C chooses it (kept in xerenge.conf as vr_cockpit): the camera pinned in the player's car, facing its
 // way (PinCamera), with a seat of its own (vr_cockpit_offset, in the car's axes from the car's origin) - the chase
 // view's vr_offset is kept for it. g_seat is the view's in use. It comes on once the race has started (PinCamera: the
 // GO), and while the game's camera is its chase camera: car selection, the race's introduction, the countdown and the
@@ -77,6 +78,15 @@ std::atomic<bool> g_cockpit{false};      // the setting
 std::atomic<bool> g_race_on{false};      // the race started (its GO)
 std::atomic<bool> g_chase_view{false};   // the game's camera its chase camera
 std::atomic<bool> g_cockpit_now{false};  // the view in use: both
+// Y in a race goes round the game's two cameras with the cockpit between them: bumper (low on the track), cockpit,
+// chase, bumper (Matt 2026-11-02: "From the low on track view, if you press Y it should go to cockpit view. From cockpit
+// view Y goes to chase cam"). The game's camera last seen (a takedown's or a crash's shot keeps it): from the bumper the
+// press goes to the game (to its chase camera) and turns the cockpit on; in the cockpit the game never sees it
+// (CycleViews), and the cockpit goes off over the chase camera.
+enum class GameView { kUnknown, kChase, kBumper };
+std::atomic<GameView> g_game_view{GameView::kUnknown};
+std::atomic<bool> g_cockpit_coming{false};  // the cockpit at the game's first chase update, not 5 on
+std::atomic<int64_t> g_view_seen_ms{0};       // when the game's camera was last its chase or bumper camera (steady ms)
 // The driver's seat from the car's origin (x right, y up, z back), Matt's, set in the headset (2026-11-01).
 constexpr const char* kCockpitSeat = "-0.350 0.722 0.000";
 
@@ -131,7 +141,13 @@ void StoreFloat(uint8_t* base, uint32_t address, float value);
 // 22 cm at 36 m/s, 42 cm at 55 m/s - and pinned to that the view slid back through the car accelerating and forward
 // braking (Matt: "We need to be pinned depth too").
 constexpr uint32_t kPlayerCarMatrix = 0x82CE0040u;
-constexpr uint32_t kRaceRunning = 0x82846B80u;  // 1 from the race's GO, 0 before it and while paused
+// 1 while the player accelerates in the race: from the countdown's first shot (not before it), 0 again a second or two
+// after letting go and while paused.
+constexpr uint32_t kRaceAccelerating = 0x82846B80u;
+constexpr uint32_t kRacePaused = 0x828466E4u;  // a byte: 1 while the race's pause menu is up
+// The countdown: the game's own shots between the race's introduction (its chase camera, ~3.5 s) and the GO, 5.4 s
+// (3, 2, 1: one shot each). Its chase camera back after this many updates of others (60 a second) is the GO.
+constexpr int kCountdownUpdates = 120;
 
 struct Pin {
   std::mutex mutex;
@@ -143,6 +159,7 @@ struct Pin {
   size_t next_camera = 0;
   bool have_car = false;  // the car there the update before
   int chase_updates = 0;  // updates in a row the game's camera has been its chase camera
+  int shot_updates = 0;   // ... and another camera (before the GO: the countdown's shots)
   uint64_t model_seen = 0;  // the car's model (plume), and for how many steps the same
   int model_steps = 0;
 } g_pin;
@@ -164,25 +181,27 @@ void PinCamera(uint8_t* base, uint32_t m) {
   ReadCar(base, kPlayerCarMatrix, car);
   const float at2 = car[2][0] * car[2][0] + car[2][1] * car[2][1] + car[2][2] * car[2][2];
   const float jx = car[3][0] - g_pin.last_pos[0], jy = car[3][1] - g_pin.last_pos[1], jz = car[3][2] - g_pin.last_pos[2];
-  // No car (a menu), or it jumped more than 50 m in a step (a new race, a restart): the race not on till the game
-  // starts it (its race-running flag, 1 from the GO - 0 through the introduction and the countdown, and while paused,
-  // which keeps the cockpit), and the car's model taken again.
+  // No car (a menu), or it jumped more than 50 m in a step (a new race, a restart): the race not on till its GO (below),
+  // and the car's model taken again.
   const bool have_car = std::fabs(at2 - 1.f) < 0.05f;
   if (!have_car || !g_pin.have_car || !(jx * jx + jy * jy + jz * jz < 50.f * 50.f)) {
     g_race_on = false;
+    g_cockpit_coming = false;
+    g_game_view = GameView::kUnknown;
     g_pin.have_relative = false;
     g_pin.model_steps = 0;
+    g_pin.shot_updates = 0;
 #ifdef _WIN32
     SetEnvironmentVariableA("XERENGE_VR_CARMODEL", nullptr);  // the last race's car's
 #endif
   }
   g_pin.have_car = have_car;
-  if (have_car && xerenge::LoadGuestU32(base, kRaceRunning) == 1) {
-    g_race_on = true;
-  }
   // The game's camera its usual chase camera (1.18 m up and 4.6 m behind the car, looking its way; the spring swings it
   // half a metre aside) for 5 updates: the countdown's shots, a takedown's and a crash's are the game's own (Matt
-  // 2026-11-01: "the camera usually zooms to the crashed car, we should respect that").
+  // 2026-11-01: "the camera usually zooms to the crashed car, we should respect that"). The race is on (latched till
+  // the next) from its GO: the chase camera back after the countdown's shots - the introduction before them shows the
+  // chase camera too (Matt: not "during the race countdown. Only once the race starts") - or the player accelerating
+  // (an event without the shots).
   {
     float game[4][3];
     ReadCar(base, m, game);
@@ -190,8 +209,28 @@ void PinCamera(uint8_t* base, uint32_t m) {
     const auto along = [&](const float* v, int k) { return v[0] * car[k][0] + v[1] * car[k][1] + v[2] * car[k][2]; };
     const float x = along(d, 0), y = along(d, 1), z = along(d, 2);
     const bool chase = std::fabs(x) < 1.5f && y > 0.5f && y < 2.2f && z > -7.f && z < -3.f && along(game[2], 2) > 0.9f;
+    // The bumper camera: 0.55 m up and 1.10 m forward, looking the car's way (a crash's shot from 1.14 up, 1 m back was
+    // taken for it when looser).
+    const bool bumper = std::fabs(x) < 0.5f && y > 0.2f && y < 0.9f && z > 0.5f && z < 2.f && along(game[2], 2) > 0.9f;
     g_pin.chase_updates = chase ? std::min(g_pin.chase_updates + 1, 5) : 0;
+    if (chase && g_cockpit_coming.exchange(false)) {
+      g_pin.chase_updates = 5;
+    }
     g_chase_view = g_pin.chase_updates >= 5;
+    g_pin.shot_updates = chase || bumper ? g_pin.shot_updates : std::min(g_pin.shot_updates + 1, kCountdownUpdates);
+    if (have_car && ((g_chase_view && g_pin.shot_updates >= kCountdownUpdates) ||
+                     xerenge::LoadGuestU32(base, kRaceAccelerating) == 1)) {
+      g_race_on = true;
+    }
+    if (chase || bumper) {
+      g_view_seen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    const GameView view = g_chase_view ? GameView::kChase : bumper ? GameView::kBumper : g_game_view.load();
+    if (g_game_view.exchange(view) != view) {
+      REXLOG_INFO("VR: the game's {} camera ({:.2f} {:.2f} {:.2f} from the car)",
+                  view == GameView::kChase ? "chase" : "bumper", x, y, z);
+    }
   }
   std::memcpy(g_pin.last_pos, car[3], sizeof(g_pin.last_pos));
   UpdateView();
@@ -319,6 +358,49 @@ void PublishSeat() {
 #endif
 }
 
+// The cockpit view chosen (C, or Y in a race), kept in xerenge.conf.
+void SetCockpit(bool on) {
+  g_cockpit = on;
+  xerenge::settings::SetConfString("vr_cockpit", on ? "1" : "0");
+  UpdateView();
+  REXLOG_INFO("VR: {} view", on ? "cockpit" : "chase");
+}
+
+// The pad as the game reads it (`state`, an XINPUT_STATE: the buttons big-endian at +4, Y 0x8000) for player `user`:
+// Y going down in a race (the game's race-running flag; not paused) goes round the views (g_game_view). A press the
+// game is not to see is taken out of the state while it is held.
+void CycleViews(uint8_t* base, uint32_t user, uint32_t state) {
+  static bool held[4] = {}, hidden[4] = {};
+  if (user >= 4 || !vr::Active()) {
+    return;
+  }
+  uint8_t* high = xerenge::GuestPointer(base, state + 4);  // the buttons' high byte: Y is its 0x80
+  const bool y = (*high & 0x80) != 0;
+  if (y && !held[user]) {
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count();
+    const bool paused = *xerenge::GuestPointer(base, kRacePaused) != 0;
+    hidden[user] = false;
+    // In a race (the game's camera its chase or bumper camera lately: not a menu, the results), not paused (Y does
+    // nothing there).
+    if (!paused && now - g_view_seen_ms.load() < 1500) {
+      if (InCockpit()) {
+        hidden[user] = true;  // cockpit -> chase: the game stays on its chase camera
+        SetCockpit(false);
+      } else if (g_game_view.load() == GameView::kBumper) {
+        g_cockpit_coming = true;  // bumper -> the game's chase camera, and the cockpit over it
+        if (!g_cockpit.load()) {
+          SetCockpit(true);
+        }
+      }
+    }
+  }
+  held[user] = y;
+  if (y && hidden[user]) {
+    *high &= 0x7F;
+  }
+}
+
 // Once a game frame: the keys held move the seat (kSeatSpeed); let go, it is saved. C changes view.
 void MoveSeat() {
 #ifdef _WIN32
@@ -339,10 +421,7 @@ void MoveSeat() {
     static bool c_was = true;  // a press counts once C has been seen up
     const bool c = held('C');
     if (c && !c_was) {
-      g_cockpit = !g_cockpit.load();
-      xerenge::settings::SetConfString("vr_cockpit", g_cockpit.load() ? "1" : "0");
-      UpdateView();
-      REXLOG_INFO("VR: {} view", g_cockpit.load() ? "cockpit" : "chase");
+      SetCockpit(!g_cockpit.load());
     }
     c_was = c;
   }
@@ -915,6 +994,15 @@ REX_HOOK_RAW(sub_8259C328) {
 REX_HOOK_RAW(sub_8259C400) {
   TraceRaceCameraRotation(ctx, false);
   __imp__sub_8259C400(ctx, base);
+}
+
+// The game's XamInputGetState (r3 the player, r4 the state): Y in a race goes round the views (CycleViews).
+REX_HOOK_RAW(sub_825AFE90) {
+  const uint32_t user = ctx.r3.u32, state = ctx.r4.u32;
+  __imp__sub_825AFE90(ctx, base);
+  if (ctx.r3.u32 == 0) {
+    CycleViews(base, user, state);
+  }
 }
 
 REX_HOOK_RAW(sub_820FBE60) {

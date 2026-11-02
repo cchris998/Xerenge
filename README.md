@@ -23,10 +23,14 @@ markers at their cars' depth all work in races, menus and replays.
   and **Ctrl+Up/Down** forward and back, up to 8 m (into the car from the
   chase camera; 1 m a second forward and back, 25 cm a second the others,
   while the game's window has the focus). It is kept in xerenge.conf as `vr_offset`.
-- **Cockpit view:** press **C** (the game's window focused) to sit in the
-  driver's seat: the view is fixed to the car, facing its way, and its windows
-  are clear. C again goes back to the chase view. The seat keys above move the
-  cockpit seat separately (`vr_cockpit_offset`), so the chase view keeps its own.
+- **Cockpit view:** in a race, **Y** (the game's change-view button) now goes
+  round three views: the low bumper view, the cockpit, then the chase view. In
+  the cockpit you sit in the driver's seat: the view is fixed to the car, facing
+  its way, and its windows are clear. **C** (the game's window focused) also
+  switches between the cockpit and the chase view. The countdown and the game's
+  own shots (takedowns, crashes) keep the game's camera. The seat keys above move
+  the cockpit seat separately for each car (`vr_cockpit_offset_<car>`), so the
+  chase view keeps its own.
 - **Settings:** changing the resolution and the other VR options is done in
   the game, under **Driver Details > Graphics**: VR EYE SIZE (the per-eye
   resolution, 2560x2160 by default, up to 7680x5760), VR FRAME CAP and

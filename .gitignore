@@ -52,6 +52,8 @@ tools/cxx/build/
 tools/bin/
 tools/lib/
 scripts/extract-image
+scripts/extract-image.exe
+rexglue/tools/*.exe
 rexglue/tools/build_runtime_shaders
 rexglue/tools/dump_xex_image
 rexglue/tools/prepare_aux_shader_cache

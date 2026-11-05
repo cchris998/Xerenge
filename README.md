@@ -11,6 +11,10 @@ regions) are not supported.
 
 ## VR (0.4.9-vr-0.2)
 
+**Experimental US build:** this fork adds a checked source-build command for
+the retail USA executable. See [US-VR.md](US-VR.md) for instructions and
+validation limits. The original public installer remains European-only.
+
 This build plays Burnout Revenge in a VR headset through OpenXR (tested with
 SteamVR). Head tracking, stereo 3D, the HUD on its own panel and the car
 markers at their cars' depth all work in races, menus and replays.
